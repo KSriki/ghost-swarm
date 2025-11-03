@@ -1,79 +1,83 @@
-"""Orchestrator Ghost - Manages and coordinates worker agents."""
+"""Worker Ghost - Executes tasks assigned by the orchestrator."""
 
 import asyncio
 from typing import Any
 
 import structlog
+from anthropic import Anthropic
 
-from common import (
-    AgentInfo,
+from common.models.messages import (
     AgentRole,
-    AgentStatus,
-    BaseAgent,
     TaskRequest,
     TaskResult,
     TaskStatus,
-    get_logger,
 )
+from common.models.agent import BaseAgent
+from common.logging.logger import get_logger
+from common.config.settings import get_settings
 
 logger = get_logger(__name__)
 
 
-class OrchestratorAgent(BaseAgent):
+class WorkerAgent(BaseAgent):
     """
-    Orchestrator Ghost that manages worker agents.
+    Worker Ghost that executes tasks.
 
     Responsibilities:
-    - Task distribution and routing
-    - Worker health monitoring
-    - Load balancing
-    - Result aggregation
+    - Execute assigned tasks
+    - Report results back to orchestrator
+    - Maintain task execution state
     """
 
-    def __init__(self, agent_id: str | None = None) -> None:
+    def __init__(
+        self,
+        agent_id: str | None = None,
+        capabilities: list[str] | None = None,
+    ) -> None:
         """
-        Initialize the orchestrator agent.
+        Initialize the worker agent.
 
         Args:
-            agent_id: Unique identifier for this orchestrator
+            agent_id: Unique identifier for this worker
+            capabilities: List of task types this worker can handle
         """
         super().__init__(
             agent_id=agent_id,
-            role=AgentRole.ORCHESTRATOR,
-            capabilities=[
-                "task_routing",
-                "load_balancing",
-                "worker_management",
-                "result_aggregation",
+            role=AgentRole.WORKER,
+            capabilities=capabilities
+            or [
+                "llm_inference",
+                "data_processing",
+                "analysis",
+                "generation",
             ],
-            max_load=100,  # Can handle many concurrent orchestration tasks
+            max_load=5,  # Can handle 5 concurrent tasks
         )
 
-        self.workers: dict[str, AgentInfo] = {}
-        self.task_assignments: dict[str, str] = {}  # task_id -> worker_id
-        self.pending_tasks: asyncio.Queue[TaskRequest] = asyncio.Queue()
+        self.settings = get_settings()
+        self.anthropic_client: Anthropic | None = None
 
-        logger.info("orchestrator_initialized", agent_id=self.agent_id)
+        logger.info("worker_initialized", agent_id=self.agent_id)
 
     async def initialize(self) -> None:
-        """Initialize orchestrator-specific resources."""
-        logger.info("initializing_orchestrator", agent_id=self.agent_id)
+        """Initialize worker-specific resources."""
+        logger.info("initializing_worker", agent_id=self.agent_id)
 
-        # Start worker discovery
-        asyncio.create_task(self._discover_workers())
+        # Initialize Anthropic client
+        self.anthropic_client = Anthropic(api_key=self.settings.anthropic_api_key)
 
-        # Start task distributor
-        asyncio.create_task(self._distribute_tasks())
+        # Register with orchestrator (in a real system)
+        # For now, this is a placeholder
+        await self._register_with_orchestrator()
 
     async def cleanup(self) -> None:
-        """Clean up orchestrator resources."""
-        logger.info("cleaning_up_orchestrator", agent_id=self.agent_id)
-        self.workers.clear()
-        self.task_assignments.clear()
+        """Clean up worker resources."""
+        logger.info("cleaning_up_worker", agent_id=self.agent_id)
+        self.anthropic_client = None
 
     async def process_task(self, task: TaskRequest) -> TaskResult:
         """
-        Process orchestration tasks.
+        Process a task assigned to this worker.
 
         Args:
             task: Task request
@@ -86,154 +90,199 @@ class OrchestratorAgent(BaseAgent):
         start_time = time.time()
 
         try:
-            if task.task_type == "distribute":
-                # Add task to distribution queue
-                await self.pending_tasks.put(task)
+            logger.info(
+                "processing_task",
+                task_id=str(task.task_id),
+                task_type=task.task_type,
+                agent_id=self.agent_id,
+            )
 
-                return TaskResult(
-                    task_id=task.task_id,
-                    status=TaskStatus.COMPLETED,
-                    result={"message": "Task queued for distribution"},
-                    execution_time=time.time() - start_time,
-                )
-
-            elif task.task_type == "get_workers":
-                # Return current worker status
-                return TaskResult(
-                    task_id=task.task_id,
-                    status=TaskStatus.COMPLETED,
-                    result={
-                        "workers": [w.model_dump() for w in self.workers.values()],
-                        "total": len(self.workers),
-                    },
-                    execution_time=time.time() - start_time,
-                )
-
+            # Route to appropriate handler based on task type
+            if task.task_type == "llm_inference":
+                result = await self._handle_llm_inference(task)
+            elif task.task_type == "data_processing":
+                result = await self._handle_data_processing(task)
+            elif task.task_type == "analysis":
+                result = await self._handle_analysis(task)
             else:
-                raise ValueError(f"Unknown orchestrator task type: {task.task_type}")
+                raise ValueError(f"Unknown task type: {task.task_type}")
+
+            execution_time = time.time() - start_time
+
+            return TaskResult(
+                task_id=task.task_id,
+                status=TaskStatus.COMPLETED,
+                result=result,
+                execution_time=execution_time,
+                metadata={
+                    "agent_id": self.agent_id,
+                    "task_type": task.task_type,
+                },
+            )
 
         except Exception as e:
-            logger.error("orchestrator_task_failed", task_id=str(task.task_id), error=str(e))
+            execution_time = time.time() - start_time
+            logger.error(
+                "task_processing_error",
+                task_id=str(task.task_id),
+                error=str(e),
+                exc_info=True,
+            )
+
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
                 error=str(e),
-                execution_time=time.time() - start_time,
+                execution_time=execution_time,
             )
 
-    async def _discover_workers(self) -> None:
-        """Periodically discover and update worker information."""
-        while True:
-            try:
-                # Send heartbeat to trigger worker responses
-                await self._send_heartbeat()
-
-                # In a real implementation, workers would respond with their info
-                # For now, this is a placeholder for the discovery mechanism
-
-                await asyncio.sleep(10)  # Discovery interval
-
-            except Exception as e:
-                logger.error("worker_discovery_error", error=str(e))
-                await asyncio.sleep(5)
-
-    async def _distribute_tasks(self) -> None:
-        """Distribute tasks to available workers."""
-        while True:
-            try:
-                # Get next task from queue
-                task = await self.pending_tasks.get()
-
-                # Find available worker
-                worker = self._select_worker(task)
-
-                if worker:
-                    # Assign task to worker
-                    await self.send_task(worker.agent_id, task)
-                    self.task_assignments[str(task.task_id)] = worker.agent_id
-
-                    logger.info(
-                        "task_assigned",
-                        task_id=str(task.task_id),
-                        worker_id=worker.agent_id,
-                    )
-                else:
-                    # No available workers, re-queue
-                    await self.pending_tasks.put(task)
-                    await asyncio.sleep(1)
-
-            except Exception as e:
-                logger.error("task_distribution_error", error=str(e))
-                await asyncio.sleep(1)
-
-    def _select_worker(self, task: TaskRequest) -> AgentInfo | None:
+    async def _handle_llm_inference(self, task: TaskRequest) -> dict[str, Any]:
         """
-        Select the best worker for a task using load balancing.
+        Handle LLM inference task using Claude.
 
         Args:
-            task: Task to assign
+            task: Task request
 
         Returns:
-            Selected worker info or None if no workers available
+            LLM response
         """
-        available_workers = [
-            worker
-            for worker in self.workers.values()
-            if worker.is_available and worker.status == AgentStatus.IDLE
-        ]
+        if not self.anthropic_client:
+            raise RuntimeError("Anthropic client not initialized")
 
-        if not available_workers:
-            return None
+        prompt = task.parameters.get("prompt", "")
+        model = task.parameters.get("model", "claude-sonnet-4-5-20250929")
+        max_tokens = task.parameters.get("max_tokens", 1024)
 
-        # Simple load balancing: select worker with lowest load
-        return min(available_workers, key=lambda w: w.current_load)
-
-    def register_worker(self, worker_info: AgentInfo) -> None:
-        """
-        Register a new worker.
-
-        Args:
-            worker_info: Worker information
-        """
-        self.workers[worker_info.agent_id] = worker_info
-        logger.info(
-            "worker_registered",
-            worker_id=worker_info.agent_id,
-            total_workers=len(self.workers),
+        logger.debug(
+            "llm_inference_request",
+            task_id=str(task.task_id),
+            model=model,
+            prompt_length=len(prompt),
         )
 
-    def unregister_worker(self, worker_id: str) -> None:
+        # Use asyncio to run the synchronous Anthropic call
+        loop = asyncio.get_event_loop()
+        message = await loop.run_in_executor(
+            None,
+            lambda: self.anthropic_client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+        )
+
+        response_text = ""
+        for block in message.content:
+            if hasattr(block, "text"):
+                response_text += block.text
+
+        return {
+            "response": response_text,
+            "model": model,
+            "usage": {
+                "input_tokens": message.usage.input_tokens,
+                "output_tokens": message.usage.output_tokens,
+            },
+        }
+
+    async def _handle_data_processing(self, task: TaskRequest) -> dict[str, Any]:
         """
-        Unregister a worker.
+        Handle data processing task.
 
         Args:
-            worker_id: Worker ID to unregister
+            task: Task request
+
+        Returns:
+            Processed data
         """
-        if worker_id in self.workers:
-            del self.workers[worker_id]
-            logger.info(
-                "worker_unregistered",
-                worker_id=worker_id,
-                total_workers=len(self.workers),
-            )
+        # Placeholder for data processing logic
+        data = task.parameters.get("data", [])
+
+        logger.debug(
+            "data_processing_request",
+            task_id=str(task.task_id),
+            data_size=len(data),
+        )
+
+        # Simulate processing
+        await asyncio.sleep(0.1)
+
+        return {
+            "processed": True,
+            "count": len(data),
+            "message": "Data processed successfully",
+        }
+
+    async def _handle_analysis(self, task: TaskRequest) -> dict[str, Any]:
+        """
+        Handle analysis task.
+
+        Args:
+            task: Task request
+
+        Returns:
+            Analysis results
+        """
+        # Placeholder for analysis logic
+        data = task.parameters.get("data", {})
+
+        logger.debug(
+            "analysis_request",
+            task_id=str(task.task_id),
+        )
+
+        # Simulate analysis
+        await asyncio.sleep(0.1)
+
+        return {
+            "analyzed": True,
+            "insights": ["Insight 1", "Insight 2"],
+            "confidence": 0.85,
+        }
+
+    async def _register_with_orchestrator(self) -> None:
+        """Register this worker with the orchestrator."""
+        # In a real implementation, this would send a registration message
+        # to the orchestrator via A2A
+        logger.info(
+            "registered_with_orchestrator",
+            agent_id=self.agent_id,
+            capabilities=self.capabilities,
+        )
 
 
 async def main() -> None:
-    """Main entry point for the orchestrator."""
+    """Main entry point for the worker."""
     from common import configure_logging
+    import signal
 
     configure_logging()
 
-    orchestrator = OrchestratorAgent()
+    worker = WorkerAgent()
+    shutdown_event = asyncio.Event()
+
+    def signal_handler() -> None:
+        """Handle shutdown signals."""
+        logger.info("shutdown_signal_received")
+        shutdown_event.set()
+
+    # Register signal handlers
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
 
     try:
-        await orchestrator.start()
-        # Keep running
-        await asyncio.Future()
-    except KeyboardInterrupt:
-        logger.info("shutdown_signal_received")
+        await worker.start()
+        logger.info("worker_running", agent_id=worker.agent_id)
+        
+        # Wait for shutdown signal
+        await shutdown_event.wait()
+        
+    except Exception as e:
+        logger.error("worker_error", error=str(e), exc_info=True)
     finally:
-        await orchestrator.stop()
+        logger.info("shutting_down_worker")
+        await worker.stop()
 
 
 if __name__ == "__main__":

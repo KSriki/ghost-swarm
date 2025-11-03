@@ -264,16 +264,23 @@ Please provide:
 
 async def main() -> None:
     """Run the filesystem MCP server."""
+    import os
     from common import configure_logging
     
     configure_logging()
     
+    # Get configuration from environment
+    allowed_dirs = os.getenv("MCP_ALLOWED_DIRECTORIES", "/app/data").split(",")
+    readonly = os.getenv("MCP_READONLY", "false").lower() == "true"
+    transport = os.getenv("MCP_TRANSPORT", "http")  # Default to HTTP in Docker
+    port = int(os.getenv("MCP_PORT", "8080"))
+    
     server = FilesystemMCPServer(
-        allowed_directories=["./data", "./docs"],
-        readonly=False,
+        allowed_directories=allowed_dirs,
+        readonly=readonly,
     )
     
-    await server.run()
+    await server.run(transport=transport, port=port)
 
 
 if __name__ == "__main__":

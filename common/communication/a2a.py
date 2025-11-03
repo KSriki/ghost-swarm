@@ -209,12 +209,18 @@ class A2AClient:
         self.websocket: websockets.WebSocketClientProtocol | None = None
         self.connected: bool = False
 
-    async def connect(self) -> None:
-        """Connect to the A2A server."""
+    async def connect(self, url: str | None = None) -> None:
+        """
+        Connect to the A2A server.
+        
+        Args:
+            url: Optional URL to connect to. If not provided, uses settings.a2a_url
+        """
         try:
-            self.websocket = await websockets.connect(self.settings.a2a_url)
+            connect_url = url if url else self.settings.a2a_url
+            self.websocket = await websockets.connect(connect_url)
             self.connected = True
-            logger.info("connected_to_a2a_server", agent_id=self.agent_id)
+            logger.info("connected_to_a2a_server", agent_id=self.agent_id, url=connect_url)
         except Exception as e:
             logger.error("connection_failed", agent_id=self.agent_id, error=str(e))
             raise

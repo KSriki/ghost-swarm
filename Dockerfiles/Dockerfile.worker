@@ -1,0 +1,10 @@
+# Worker - inherits from dependencies stage for docker-compose (with volume mounts)
+# syntax=docker/dockerfile:1.4
+FROM ghost-base:dependencies
+
+USER appuser
+WORKDIR /app
+
+ENV GHOST_ROLE=worker
+
+CMD ["/app/.venv/bin/python", "-m", "ghosts.worker.worker"]

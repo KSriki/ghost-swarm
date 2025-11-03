@@ -1,0 +1,10 @@
+# Orchestrator - inherits from dependencies stage for docker-compose (with volume mounts)
+# syntax=docker/dockerfile:1.4
+FROM ghost-base:dependencies
+
+USER appuser
+WORKDIR /app
+
+ENV GHOST_ROLE=orchestrator
+
+CMD ["/app/.venv/bin/python", "-m", "ghosts.orchestrator.orchestrator"]

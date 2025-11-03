@@ -5,16 +5,16 @@ from typing import Any
 
 import structlog
 
-from common import (
+from common.models.messages import (
     AgentInfo,
     AgentRole,
     AgentStatus,
-    BaseAgent,
     TaskRequest,
     TaskResult,
     TaskStatus,
-    get_logger,
 )
+from common.models.agent import BaseAgent
+from common.logging.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -125,8 +125,8 @@ class OrchestratorAgent(BaseAgent):
         """Periodically discover and update worker information."""
         while True:
             try:
-                # Send heartbeat to trigger worker responses
-                await self._send_heartbeat()
+                # Broadcast heartbeat to discover workers
+                await self._broadcast_heartbeat()
 
                 # In a real implementation, workers would respond with their info
                 # For now, this is a placeholder for the discovery mechanism
@@ -221,18 +221,34 @@ class OrchestratorAgent(BaseAgent):
 async def main() -> None:
     """Main entry point for the orchestrator."""
     from common import configure_logging
+    import signal
 
     configure_logging()
 
     orchestrator = OrchestratorAgent()
+    shutdown_event = asyncio.Event()
+
+    def signal_handler() -> None:
+        """Handle shutdown signals."""
+        logger.info("shutdown_signal_received")
+        shutdown_event.set()
+
+    # Register signal handlers
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
 
     try:
         await orchestrator.start()
-        # Keep running
-        await asyncio.Future()
-    except KeyboardInterrupt:
-        logger.info("shutdown_signal_received")
+        logger.info("orchestrator_running", agent_id=orchestrator.agent_id)
+        
+        # Wait for shutdown signal
+        await shutdown_event.wait()
+        
+    except Exception as e:
+        logger.error("orchestrator_error", error=str(e), exc_info=True)
     finally:
+        logger.info("shutting_down_orchestrator")
         await orchestrator.stop()
 
 

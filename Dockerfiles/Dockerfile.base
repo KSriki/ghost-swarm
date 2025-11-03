@@ -1,0 +1,86 @@
+# Ghost Swarm Base Image - ULTRA-OPTIMIZED Multistage Build
+# ==================================================
+# CRITICAL: This uses BuildKit cache mounts for MAXIMUM speed
+# Code changes rebuild ONLY the final layer (< 5 seconds)
+
+# syntax=docker/dockerfile:1.4
+
+# -----------------------------------------------------------------------------
+# Stage 1: System Dependencies (CACHED - rarely changes)
+# -----------------------------------------------------------------------------
+FROM python:3.13-slim AS system-deps
+
+# Install system dependencies in one layer
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    build-essential \
+    pkg-config \
+    netcat-openbsd \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV with pip cache
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir uv
+
+# -----------------------------------------------------------------------------
+# Stage 2: User & Directory Setup (OPTIMIZED - minimal operations)
+# -----------------------------------------------------------------------------
+FROM system-deps AS base-setup
+
+# Create appuser with ghost group membership in one command
+RUN groupadd -r ghost && \
+    useradd --create-home --shell /bin/bash -g ghost appuser && \
+    mkdir -p /app/data /app/logs /app/common /app/ghosts /app/mcp_server /app/tests && \
+    chown -R appuser:ghost /app
+
+WORKDIR /app
+USER appuser
+
+# -----------------------------------------------------------------------------
+# Stage 3: Python Dependencies (CACHED - only rebuilds when deps change)
+# -----------------------------------------------------------------------------
+FROM base-setup AS dependencies
+
+# Copy ONLY dependency files (changes trigger rebuild from here)
+COPY --chown=appuser:ghost pyproject.toml uv.lock ./
+
+# Install deps with UV cache mount (FAST!)
+# Run as appuser to avoid permission issues
+RUN --mount=type=cache,target=/home/appuser/.cache/uv,uid=1000,gid=1000 \
+    uv sync --frozen --no-dev
+
+# .venv is already owned by appuser:ghost from the start - NO chmod/chown needed!
+
+# -----------------------------------------------------------------------------
+# Stage 4: Development (for docker-compose with volumes)
+# -----------------------------------------------------------------------------
+FROM dependencies AS development
+
+# Install dev dependencies with cache mount
+RUN --mount=type=cache,target=/home/appuser/.cache/uv,uid=1000,gid=1000 \
+    uv sync --dev --frozen
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV DEVELOPMENT=true
+
+# -----------------------------------------------------------------------------
+# Stage 5: Production (with source baked in)
+# -----------------------------------------------------------------------------
+FROM dependencies AS production
+
+# Copy source code (ONLY rebuilds THIS layer on code changes - ~1-5 seconds!)
+COPY --chown=appuser:ghost common/ ./common/
+COPY --chown=appuser:ghost ghosts/ ./ghosts/
+COPY --chown=appuser:ghost mcp_server/ ./mcp_server/
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONOPTIMIZE=2
+ENV DEVELOPMENT=false

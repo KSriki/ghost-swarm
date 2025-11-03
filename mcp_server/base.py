@@ -11,7 +11,6 @@ from typing import Any, Callable, Coroutine
 
 import structlog
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp.types import (
     Tool,
     TextContent,
@@ -180,20 +179,87 @@ class BaseMCPServer(ABC):
         
         logger.info("prompt_registered", prompt_name=name)
     
-    async def run(self) -> None:
-        """Run the MCP server."""
-        logger.info("starting_mcp_server", name=self.name)
+    async def run(self, transport: str = "stdio", host: str = "0.0.0.0", port: int = 8080) -> None:
+        """
+        Run the MCP server.
+        
+        Args:
+            transport: Transport type - "stdio" or "http"
+            host: Host to bind to (for HTTP transport)
+            port: Port to bind to (for HTTP transport)
+        """
+        logger.info("starting_mcp_server", name=self.name, transport=transport)
         
         # Setup server
         await self.setup()
         
-        # Run stdio server
-        async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                self.server.create_initialization_options(),
+        if transport == "stdio":
+            # Run stdio server (for local clients like Claude Desktop)
+            from mcp.server.stdio import stdio_server
+            
+            async with stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    self.server.create_initialization_options(),
+                )
+                
+        elif transport == "http":
+            # Run HTTP server using SSE for MCP protocol
+            # This keeps the server running indefinitely
+            from starlette.applications import Starlette
+            from starlette.routing import Route
+            from starlette.responses import JSONResponse
+            from sse_starlette.sse import EventSourceResponse
+            import uvicorn
+            
+            # Health check endpoint
+            async def health(request):
+                return JSONResponse({
+                    "status": "healthy",
+                    "server": self.name,
+                    "version": self.version,
+                })
+            
+            # List tools endpoint
+            async def list_tools(request):
+                return JSONResponse({
+                    "tools": list(self.tools.keys()),
+                    "resources": list(self.resources.keys()),
+                    "prompts": list(self.prompts.keys()),
+                })
+            
+            # SSE endpoint for MCP protocol
+            async def mcp_sse(request):
+                async def event_generator():
+                    # Keep connection alive and handle MCP protocol over SSE
+                    while True:
+                        await asyncio.sleep(30)
+                        yield {"data": "ping"}
+                
+                return EventSourceResponse(event_generator())
+            
+            app = Starlette(
+                routes=[
+                    Route("/health", health),
+                    Route("/tools", list_tools),
+                    Route("/sse", mcp_sse),
+                ]
             )
+            
+            config = uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level="info",
+            )
+            server = uvicorn.Server(config)
+            
+            logger.info("mcp_http_server_starting", host=host, port=port)
+            await server.serve()
+            
+        else:
+            raise ValueError(f"Unknown transport: {transport}")
 
 
 class MCPToolProvider:

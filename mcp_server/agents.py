@@ -344,12 +344,17 @@ Please:
 
 async def main() -> None:
     """Run the agent management MCP server."""
+    import os
     from common import configure_logging
     
     configure_logging()
     
+    # Get configuration from environment
+    transport = os.getenv("MCP_TRANSPORT", "http")  # Default to HTTP in Docker
+    port = int(os.getenv("MCP_PORT", "8081"))
+    
     server = AgentManagementMCPServer()
-    await server.run()
+    await server.run(transport=transport, port=port)
 
 
 if __name__ == "__main__":
