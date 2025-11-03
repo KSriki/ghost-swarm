@@ -382,3 +382,7 @@ response = await claude.chat("List all Python files", use_tools=True)
 - **[MCP Implementation](docs/MCP_IMPLEMENTATION.md)** - Architecture details
 - **[Examples](mcp_server/examples.py)** - Working code samples
 
+
+## Scaling workers
+
+docker-compose up --scale worker-1=5
