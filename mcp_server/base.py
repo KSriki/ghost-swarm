@@ -1,49 +1,54 @@
 """
-MCP Server Base Implementation for Ghost Swarm.
+MCP Server Base Implementation with Concurrency Support.
 
-Provides a foundation for creating MCP servers that expose tools, resources,
-and prompts to AI agents using Claude, integrated with our A2A framework.
+Enhanced with uvloop and executor pools for optimal performance.
+Fully compatible with existing MCP servers (agents.py, filesystem.py).
 """
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Optional
 
 import structlog
 from mcp.server import Server
-from mcp.types import (
-    Tool,
-    TextContent,
-    ImageContent,
-    EmbeddedResource,
-)
+from mcp.types import Tool, TextContent
 
-from common import get_logger
+from common import get_executor_pool, ExecutorPool
 
-logger = get_logger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class BaseMCPServer(ABC):
     """
-    Base MCP Server for Ghost Swarm.
+    Base MCP Server with built-in concurrency support.
     
-    Provides standardized interface for:
-    - Tools: Model-controlled actions
-    - Resources: Application-controlled context  
-    - Prompts: User-controlled interactions
+    Features:
+    - Automatic uvloop integration (installed on import)
+    - Process pool for CPU-bound operations
+    - Thread pool for I/O-bound operations
+    - Tools, resources, and prompts registry
     """
     
-    def __init__(self, name: str, version: str = "1.0.0") -> None:
+    def __init__(
+        self, 
+        name: str, 
+        version: str = "1.0.0",
+        executor_pool: Optional[ExecutorPool] = None,
+    ) -> None:
         """
         Initialize MCP server.
         
         Args:
             name: Server name
             version: Server version
+            executor_pool: Optional custom executor pool (uses global if None)
         """
         self.name = name
         self.version = version
         self.server = Server(name)
+        
+        # Executor pool for concurrent operations
+        self.executor_pool = executor_pool or get_executor_pool()
         
         # Tool registry
         self.tools: dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
@@ -54,7 +59,13 @@ class BaseMCPServer(ABC):
         # Prompt templates
         self.prompts: dict[str, dict[str, Any]] = {}
         
-        logger.info("mcp_server_initialized", name=name, version=version)
+        logger.info(
+            "mcp_server_initialized",
+            name=name,
+            version=version,
+            process_workers=self.executor_pool.max_process_workers,
+            thread_workers=self.executor_pool.max_thread_workers,
+        )
     
     @abstractmethod
     async def setup(self) -> None:
@@ -67,6 +78,7 @@ class BaseMCPServer(ABC):
         description: str,
         parameters: dict[str, Any],
         handler: Callable[..., Coroutine[Any, Any, Any]],
+        is_cpu_intensive: bool = False,
     ) -> None:
         """
         Register a tool with the MCP server.
@@ -76,8 +88,28 @@ class BaseMCPServer(ABC):
             description: Tool description
             parameters: JSON schema for parameters
             handler: Async function to handle tool execution
+            is_cpu_intensive: If True, wraps handler to run in process pool
         """
-        self.tools[name] = handler
+        # Wrap CPU-intensive handlers to run in process pool
+        if is_cpu_intensive:
+            original_handler = handler
+            
+            async def wrapped_handler(**kwargs: Any) -> Any:
+                """Wrapper that executes in process pool."""
+                # Note: handler must be a pure function for multiprocessing
+                return await self.executor_pool.run_in_process(
+                    lambda: asyncio.run(original_handler(**kwargs))
+                )
+            
+            self.tools[name] = wrapped_handler
+            logger.debug(
+                "tool_registered_cpu_intensive",
+                tool=name,
+                description=description,
+            )
+        else:
+            self.tools[name] = handler
+            logger.debug("tool_registered", tool=name, description=description)
         
         tool = Tool(
             name=name,
@@ -179,9 +211,39 @@ class BaseMCPServer(ABC):
         
         logger.info("prompt_registered", prompt_name=name)
     
-    async def run(self, transport: str = "stdio", host: str = "0.0.0.0", port: int = 8080) -> None:
+    async def run_in_process(self, func: Callable, *args: Any, **kwargs: Any) -> Any:
         """
-        Run the MCP server.
+        Execute a function in the process pool (for CPU-bound work).
+        
+        Example:
+            embeddings = await self.run_in_process(
+                compute_embeddings, 
+                text_batch
+            )
+        """
+        return await self.executor_pool.run_in_process(func, *args, **kwargs)
+    
+    async def run_in_thread(self, func: Callable, *args: Any, **kwargs: Any) -> Any:
+        """
+        Execute a function in the thread pool (for I/O-bound work).
+        
+        Example:
+            response = await self.run_in_thread(
+                requests.post,
+                api_url,
+                json=payload
+            )
+        """
+        return await self.executor_pool.run_in_thread(func, *args, **kwargs)
+    
+    async def run(
+        self,
+        transport: str = "stdio",
+        host: str = "0.0.0.0",
+        port: int = 8080,
+    ) -> None:
+        """
+        Run the MCP server with specified transport.
         
         Args:
             transport: Transport type - "stdio" or "http"
@@ -206,7 +268,6 @@ class BaseMCPServer(ABC):
                 
         elif transport == "http":
             # Run HTTP server using SSE for MCP protocol
-            # This keeps the server running indefinitely
             from starlette.applications import Starlette
             from starlette.routing import Route
             from starlette.responses import JSONResponse
@@ -219,6 +280,10 @@ class BaseMCPServer(ABC):
                     "status": "healthy",
                     "server": self.name,
                     "version": self.version,
+                    "concurrency": {
+                        "process_workers": self.executor_pool.max_process_workers,
+                        "thread_workers": self.executor_pool.max_thread_workers,
+                    }
                 })
             
             # List tools endpoint
@@ -247,19 +312,32 @@ class BaseMCPServer(ABC):
                 ]
             )
             
+            # Use uvloop-optimized uvicorn
             config = uvicorn.Config(
                 app,
                 host=host,
                 port=port,
                 log_level="info",
+                loop="uvloop",  # Explicitly use uvloop
             )
             server = uvicorn.Server(config)
             
-            logger.info("mcp_http_server_starting", host=host, port=port)
+            logger.info(
+                "mcp_http_server_starting",
+                host=host,
+                port=port,
+                loop="uvloop",
+            )
             await server.serve()
             
         else:
             raise ValueError(f"Unknown transport: {transport}")
+    
+    async def cleanup(self) -> None:
+        """Cleanup resources on shutdown."""
+        logger.info("mcp_server_cleanup", name=self.name)
+        # Executor pool cleanup handled globally
+        pass
 
 
 class MCPToolProvider:
@@ -269,9 +347,10 @@ class MCPToolProvider:
     Bridges MCP servers with our Agent2Agent framework.
     """
     
-    def __init__(self) -> None:
+    def __init__(self, executor_pool: Optional[ExecutorPool] = None) -> None:
         """Initialize tool provider."""
         self.servers: dict[str, BaseMCPServer] = {}
+        self.executor_pool = executor_pool or get_executor_pool()
         logger.info("mcp_tool_provider_initialized")
     
     def register_server(self, server: BaseMCPServer) -> None:
@@ -319,21 +398,12 @@ class MCPToolProvider:
         Returns:
             Tool execution result
         """
-        if server_name not in self.servers:
+        server = self.servers.get(server_name)
+        if not server:
             raise ValueError(f"Unknown server: {server_name}")
         
-        server = self.servers[server_name]
-        
-        if tool_name not in server.tools:
+        tool_handler = server.tools.get(tool_name)
+        if not tool_handler:
             raise ValueError(f"Unknown tool: {tool_name}")
         
-        handler = server.tools[tool_name]
-        result = await handler(**arguments)
-        
-        logger.info(
-            "tool_executed",
-            tool_name=tool_name,
-            server_name=server_name,
-        )
-        
-        return result
+        return await tool_handler(**arguments)

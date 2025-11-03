@@ -26,6 +26,14 @@ from common.models.messages import (
     TaskStatus,
 )
 
+from common.communication.concurrency import (
+    ExecutorPool,
+    get_executor_pool,
+    run_cpu_bound,
+    run_io_bound,
+    cleanup_executors,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -53,4 +61,11 @@ __all__ = [
     "TaskRequest",
     "TaskResult",
     "TaskStatus",
+    # Concurrency
+    "ExecutorPool",
+    "get_executor_pool",
+    # Task and Future Management
+    "run_cpu_bound",
+    "run_io_bound",
+    "cleanup_executors",
 ]

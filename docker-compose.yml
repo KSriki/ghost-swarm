@@ -187,7 +187,7 @@ services:
     container_name: ghost-worker-1
     environment:
       # Worker Configuration
-      WORKER_ID: ${WORKER_1_ID:-worker-1}
+      AGENT_ID: ${AGENT_ID:-worker-1}      # ✅ Alternative
       WORKER_CAPABILITIES: ${WORKER_1_CAPABILITIES:-llm_inference,data_processing,analysis}
       # Claude API
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -230,7 +230,7 @@ services:
     container_name: ghost-worker-2
     environment:
       # Worker Configuration
-      WORKER_ID: ${WORKER_2_ID:-worker-2}
+      AGENT_ID: ${AGENT_ID:-worker-2}
       WORKER_CAPABILITIES: ${WORKER_2_CAPABILITIES:-llm_inference,data_processing,analysis}
       # Claude API
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -273,7 +273,7 @@ services:
     container_name: ghost-worker-3
     environment:
       # Worker Configuration
-      WORKER_ID: ${WORKER_3_ID:-worker-3}
+      AGENT_ID: ${AGENT_ID:-worker-3}
       WORKER_CAPABILITIES: ${WORKER_3_CAPABILITIES:-llm_inference,data_processing,analysis}
       # Claude API
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}

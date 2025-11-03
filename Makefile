@@ -31,22 +31,22 @@ help: ## Show this help message
 install: ## Install dependencies with UV
 	@echo "$(BLUE)Installing dependencies...$(NC)"
 	$(UV) sync
-	@echo "$(GREEN)âœ“ Dependencies installed$(NC)"
+	@echo "$(GREEN)“ Dependencies installed$(NC)"
 
 install-dev: ## Install development dependencies
 	@echo "$(BLUE)Installing dev dependencies...$(NC)"
 	$(UV) sync --dev
-	@echo "$(GREEN)âœ“ Dev dependencies installed$(NC)"
+	@echo "$(GREEN)“ Dev dependencies installed$(NC)"
 
 sync: ## Sync dependencies (update uv.lock)
 	@echo "$(BLUE)Syncing dependencies...$(NC)"
 	$(UV) sync --frozen
-	@echo "$(GREEN)âœ“ Dependencies synced$(NC)"
+	@echo "$(GREEN)“ Dependencies synced$(NC)"
 
 env: ## Create .env file from template
 	@if [ ! -f .env ]; then \
 		cp .env.example .env; \
-		echo "$(GREEN)âœ“ Created .env file$(NC)"; \
+		echo "$(GREEN)“ Created .env file$(NC)"; \
 		echo "$(YELLOW)âš  Please edit .env and add your API keys$(NC)"; \
 	else \
 		echo "$(YELLOW).env already exists$(NC)"; \
@@ -59,22 +59,22 @@ env: ## Create .env file from template
 build: ## Build all Docker images
 	@echo "$(BLUE)Building Docker images...$(NC)"
 	$(COMPOSE) build
-	@echo "$(GREEN)âœ“ All images built$(NC)"
+	@echo "$(GREEN)“ All images built$(NC)"
 
 build-base: ## Build only base image
 	@echo "$(BLUE)Building base image...$(NC)"
 	$(COMPOSE) build ghost-base
-	@echo "$(GREEN)âœ“ Base image built$(NC)"
+	@echo "$(GREEN)“ Base image built$(NC)"
 
 build-no-cache: ## Build without cache (clean build)
 	@echo "$(BLUE)Building images without cache...$(NC)"
 	$(COMPOSE) build --no-cache
-	@echo "$(GREEN)âœ“ Clean build complete$(NC)"
+	@echo "$(GREEN)“ Clean build complete$(NC)"
 
 build-parallel: ## Build images in parallel
 	@echo "$(BLUE)Building images in parallel...$(NC)"
 	$(COMPOSE) build --parallel
-	@echo "$(GREEN)âœ“ Parallel build complete$(NC)"
+	@echo "$(GREEN)“ Parallel build complete$(NC)"
 
 quick-build: ## Fast rebuild for code changes only (~5-15 seconds)
 	@echo "$(BLUE)Quick build (code layer only)...$(NC)"
@@ -106,19 +106,19 @@ clean-cache: ## Clean Docker build cache (use when builds are stuck)
 up: ## Start all services
 	@echo "$(BLUE)Starting Ghost Swarm...$(NC)"
 	$(COMPOSE) up -d
-	@echo "$(GREEN)âœ“ Ghost Swarm started$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm started$(NC)"
 	@make status
 
 up-build: ## Build and start all services
 	@echo "$(BLUE)Building and starting Ghost Swarm...$(NC)"
 	$(COMPOSE) up -d --build
-	@echo "$(GREEN)âœ“ Ghost Swarm started$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm started$(NC)"
 	@make status
 
 down: ## Stop all services
 	@echo "$(BLUE)Stopping Ghost Swarm...$(NC)"
 	$(COMPOSE) down
-	@echo "$(GREEN)âœ“ Ghost Swarm stopped$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm stopped$(NC)"
 
 down-volumes: ## Stop services and remove volumes
 	@echo "$(YELLOW)âš  This will delete all data!$(NC)"
@@ -126,13 +126,13 @@ down-volumes: ## Stop services and remove volumes
 	echo; \
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
 		$(COMPOSE) down -v; \
-		echo "$(GREEN)âœ“ Services stopped and volumes removed$(NC)"; \
+		echo "$(GREEN)“ Services stopped and volumes removed$(NC)"; \
 	fi
 
 restart: ## Restart all services
 	@echo "$(BLUE)Restarting Ghost Swarm...$(NC)"
 	$(COMPOSE) restart
-	@echo "$(GREEN)âœ“ Ghost Swarm restarted$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm restarted$(NC)"
 
 restart-service: ## Restart a specific service (usage: make restart-service SERVICE=worker-1)
 	@if [ -z "$(SERVICE)" ]; then \
@@ -142,7 +142,7 @@ restart-service: ## Restart a specific service (usage: make restart-service SERV
 	fi
 	@echo "$(BLUE)Restarting $(SERVICE)...$(NC)"
 	$(COMPOSE) restart $(SERVICE)
-	@echo "$(GREEN)âœ“ $(SERVICE) restarted$(NC)"
+	@echo "$(GREEN)“ $(SERVICE) restarted$(NC)"
 
 ## =============================================================================
 ## Logs & Monitoring
@@ -188,12 +188,12 @@ scale: ## Scale workers (usage: make scale WORKERS=5)
 	fi
 	@echo "$(BLUE)Scaling to $(WORKERS) workers...$(NC)"
 	$(COMPOSE) up -d --scale worker-1=$(WORKERS)
-	@echo "$(GREEN)âœ“ Scaled to $(WORKERS) workers$(NC)"
+	@echo "$(GREEN)“ Scaled to $(WORKERS) workers$(NC)"
 
 scale-down: ## Scale down to 1 worker
 	@echo "$(BLUE)Scaling down to 1 worker...$(NC)"
 	$(COMPOSE) up -d --scale worker-1=1
-	@echo "$(GREEN)âœ“ Scaled down$(NC)"
+	@echo "$(GREEN)“ Scaled down$(NC)"
 
 ## =============================================================================
 ## Shell Access
@@ -228,27 +228,27 @@ exec-service: ## Execute command in specific service (usage: make exec-service S
 test: ## Run tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	$(COMPOSE) exec orchestrator pytest
-	@echo "$(GREEN)âœ“ Tests complete$(NC)"
+	@echo "$(GREEN)“ Tests complete$(NC)"
 
 test-local: ## Run tests locally with UV
 	@echo "$(BLUE)Running tests locally...$(NC)"
 	$(UV) run pytest
-	@echo "$(GREEN)âœ“ Tests complete$(NC)"
+	@echo "$(GREEN)“ Tests complete$(NC)"
 
 lint: ## Lint code
 	@echo "$(BLUE)Linting code...$(NC)"
 	$(UV) run ruff check .
-	@echo "$(GREEN)âœ“ Linting complete$(NC)"
+	@echo "$(GREEN)“ Linting complete$(NC)"
 
 format: ## Format code
 	@echo "$(BLUE)Formatting code...$(NC)"
 	$(UV) run black .
-	@echo "$(GREEN)âœ“ Formatting complete$(NC)"
+	@echo "$(GREEN)“ Formatting complete$(NC)"
 
 type-check: ## Type check with mypy
 	@echo "$(BLUE)Type checking...$(NC)"
 	$(UV) run mypy .
-	@echo "$(GREEN)âœ“ Type checking complete$(NC)"
+	@echo "$(GREEN)“ Type checking complete$(NC)"
 
 check-all: lint format type-check ## Run all checks
 
@@ -258,13 +258,13 @@ check-all: lint format type-check ## Run all checks
 
 test-a2a: ## Test A2A connectivity between agents
 	@echo "$(BLUE)Testing A2A connectivity...$(NC)"
-	@$(COMPOSE) exec worker-1 python -c "from common.communication.a2a import A2AClient; import asyncio; asyncio.run((lambda: print('âœ“ A2A imports work'))())"
-	@echo "$(GREEN)âœ“ A2A connectivity test passed$(NC)"
+	@$(COMPOSE) exec worker-1 python -c "from common.communication.a2a import A2AClient; import asyncio; asyncio.run((lambda: print('“ A2A imports work'))())"
+	@echo "$(GREEN)“ A2A connectivity test passed$(NC)"
 
 test-redis: ## Test Redis connectivity
 	@echo "$(BLUE)Testing Redis connectivity...$(NC)"
-	@$(COMPOSE) exec worker-1 python -c "import redis; r=redis.from_url('redis://redis:6379'); print('âœ“ Redis ping:', r.ping())"
-	@echo "$(GREEN)âœ“ Redis connectivity test passed$(NC)"
+	@$(COMPOSE) exec worker-1 python -c "import redis; r=redis.from_url('redis://redis:6379'); print('“ Redis ping:', r.ping())"
+	@echo "$(GREEN)“ Redis connectivity test passed$(NC)"
 
 test-all: test-a2a test-redis ## Run all connectivity tests
 
@@ -276,7 +276,7 @@ clean: ## Clean up containers and images
 	@echo "$(BLUE)Cleaning up...$(NC)"
 	$(COMPOSE) down
 	docker system prune -f
-	@echo "$(GREEN)âœ“ Cleanup complete$(NC)"
+	@echo "$(GREEN)“ Cleanup complete$(NC)"
 
 clean-all: ## Clean up everything including volumes and images
 	@echo "$(YELLOW)âš  This will delete ALL data and images!$(NC)"
@@ -285,13 +285,13 @@ clean-all: ## Clean up everything including volumes and images
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
 		$(COMPOSE) down -v --rmi all; \
 		docker system prune -af --volumes; \
-		echo "$(GREEN)âœ“ Deep cleanup complete$(NC)"; \
+		echo "$(GREEN)“ Deep cleanup complete$(NC)"; \
 	fi
 
 clean-logs: ## Clean up log files
 	@echo "$(BLUE)Cleaning logs...$(NC)"
 	rm -rf logs/*.log
-	@echo "$(GREEN)âœ“ Logs cleaned$(NC)"
+	@echo "$(GREEN)“ Logs cleaned$(NC)"
 
 ## =============================================================================
 ## Production Operations
@@ -300,12 +300,12 @@ clean-logs: ## Clean up log files
 prod-up: ## Start in production mode
 	@echo "$(BLUE)Starting Ghost Swarm in production mode...$(NC)"
 	ENVIRONMENT=production $(COMPOSE) -f docker-compose.yml -f docker-compose.prod.yml up -d
-	@echo "$(GREEN)âœ“ Ghost Swarm started in production mode$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm started in production mode$(NC)"
 
 prod-build: ## Build production images
 	@echo "$(BLUE)Building production images...$(NC)"
 	DOCKER_TARGET=production-with-source $(COMPOSE) -f docker-compose.yml -f docker-compose.prod.yml build
-	@echo "$(GREEN)âœ“ Production images built$(NC)"
+	@echo "$(GREEN)“ Production images built$(NC)"
 
 prod-down: ## Stop production services
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.prod.yml down
@@ -315,7 +315,7 @@ prod-down: ## Stop production services
 ## =============================================================================
 
 dev-setup: install-dev env ## Complete development setup
-	@echo "$(GREEN)âœ“ Development environment ready$(NC)"
+	@echo "$(GREEN)“ Development environment ready$(NC)"
 	@echo "$(YELLOW)Next steps:$(NC)"
 	@echo "  1. Edit .env and add your ANTHROPIC_API_KEY"
 	@echo "  2. Run: make build"
@@ -340,11 +340,11 @@ inspect: ## Inspect a service (usage: make inspect SERVICE=worker-1)
 ## =============================================================================
 
 quick-start: env build up ## Quick start (setup, build, start)
-	@echo "$(GREEN)âœ“ Ghost Swarm is running!$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm is running!$(NC)"
 	@make status
 
 quick-restart: down up ## Quick restart
-	@echo "$(GREEN)âœ“ Ghost Swarm restarted$(NC)"
+	@echo "$(GREEN)“ Ghost Swarm restarted$(NC)"
 
 rebuild: down build-no-cache up ## Full rebuild
 
@@ -359,7 +359,7 @@ network-test: ## Test network connectivity between services
 	@echo "$(BLUE)Testing network connectivity...$(NC)"
 	@$(COMPOSE) exec worker-1 ping -c 3 orchestrator
 	@$(COMPOSE) exec worker-1 ping -c 3 redis
-	@echo "$(GREEN)âœ“ Network connectivity test passed$(NC)"
+	@echo "$(GREEN)“ Network connectivity test passed$(NC)"
 
 debug-orchestrator: ## Show debug info for orchestrator
 	@echo "$(BLUE)Orchestrator Debug Info:$(NC)"

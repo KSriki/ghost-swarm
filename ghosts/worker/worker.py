@@ -258,7 +258,8 @@ async def main() -> None:
 
     configure_logging()
 
-    worker = WorkerAgent()
+    import os
+    worker = WorkerAgent(agent_id=os.getenv("AGENT_ID"))
     shutdown_event = asyncio.Event()
 
     def signal_handler() -> None:

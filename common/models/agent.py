@@ -206,7 +206,7 @@ class BaseAgent(ABC):
         # Discover based on role
         if self.role == AgentRole.WORKER:
             # Workers need to know about orchestrator
-            self.peer_agents["orchestrator"] = "ws://orchestrator:8765"
+            self.peer_agents["orchestrator"] = "ws://ghost-orchestrator:8765"
         
         elif self.role == AgentRole.ORCHESTRATOR:
             # Orchestrator discovers workers
@@ -214,7 +214,7 @@ class BaseAgent(ABC):
             # TODO: Dynamic discovery via Redis
             for i in range(1, settings.max_workers + 1):
                 worker_id = f"worker-{i}"
-                self.peer_agents[worker_id] = f"ws://worker-{i}:8766"
+                self.peer_agents[worker_id] = f"ws://ghost-worker-{i}:8766"
         
         logger.info(
             "peers_discovered",
