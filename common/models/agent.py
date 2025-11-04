@@ -1,8 +1,9 @@
-"""Refactored base agent class with integrated A2A server."""
+"""Refactored base agent class with integrated A2A server and hybrid inference."""
 
 import asyncio
+import os
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 import structlog
@@ -18,6 +19,8 @@ from common.models.messages import (
     TaskResult,
     TaskStatus,
 )
+# Import from communication.concurrency (correct path for your structure)
+from common.communication.concurrency import get_executor_pool, ExecutorPool
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +31,12 @@ class BaseAgent(ABC):
     
     Each agent runs its own A2A server AND can connect to other agents.
     No central A2A hub needed - pure peer-to-peer communication.
+    
+    Includes:
+    - Hybrid Inference (SLM + LLM routing)
+    - ExecutorPool integration for non-blocking operations
+    - Statistics tracking
+    - Concurrency with uvloop
     """
 
     def __init__(
@@ -37,6 +46,7 @@ class BaseAgent(ABC):
         capabilities: list[str] | None = None,
         max_load: int = 10,
         a2a_port: int | None = None,
+        llm_client: Any | None = None,  # Claude/Anthropic client for hybrid inference
     ) -> None:
         """
         Initialize the base agent.
@@ -47,6 +57,7 @@ class BaseAgent(ABC):
             capabilities: List of capabilities this agent supports
             max_load: Maximum concurrent tasks
             a2a_port: Port for this agent's A2A server
+            llm_client: LLM client (e.g., Anthropic) for hybrid inference
         """
         self.agent_id = agent_id or f"{role.value}-{uuid4().hex[:8]}"
         self.role = role
@@ -70,6 +81,19 @@ class BaseAgent(ABC):
         # Server control
         self.server_task: asyncio.Task[Any] | None = None
         self.shutdown_event = asyncio.Event()
+        
+        # ExecutorPool for non-blocking CPU/IO operations
+        # Used by TaskMaster classification, inference, and other concurrent operations
+        self.executor_pool: ExecutorPool = get_executor_pool()
+        
+        # Hybrid Inference Engine (SLM + LLM)
+        # Each agent can now choose between SLM and LLM based on task complexity
+        self.llm_client = llm_client
+        self.inference_engine: Optional[Any] = None
+        
+        # Will be initialized in start() if llm_client provided
+        if llm_client:
+            self._init_inference_engine()
 
         logger.info(
             "agent_initialized",
@@ -77,6 +101,8 @@ class BaseAgent(ABC):
             role=role.value,
             a2a_port=self.a2a_port,
             capabilities=self.capabilities,
+            hybrid_inference=self.inference_engine is not None,
+            executor_pool_workers=f"{self.executor_pool.max_process_workers}p/{self.executor_pool.max_thread_workers}t",
         )
 
     def _default_port_for_role(self, role: AgentRole) -> int:
@@ -89,6 +115,38 @@ class BaseAgent(ABC):
             AgentRole.OPTIMIZER: 8769,
         }
         return port_map.get(role, 8770)
+    
+    def _init_inference_engine(self) -> None:
+        """Initialize hybrid inference engine."""
+        try:
+            from common.inference import HybridInferenceEngine
+            
+            self.inference_engine = HybridInferenceEngine(
+                llm_client=self.llm_client,
+                slm_provider=os.getenv("SLM_PROVIDER", "llama_cpp"),
+                slm_endpoint=os.getenv("SLM_ENDPOINT"),
+                enable_fallback=os.getenv("ENABLE_SLM_FALLBACK", "true").lower() == "true",
+            )
+            
+            logger.info(
+                "hybrid_inference_initialized",
+                agent_id=self.agent_id,
+                slm_provider=self.inference_engine.slm_provider.provider_type.value,
+            )
+        except ImportError as e:
+            logger.warning(
+                "hybrid_inference_unavailable",
+                agent_id=self.agent_id,
+                error=str(e),
+                message="Inference module not found. Agent will not support hybrid inference.",
+            )
+        except Exception as e:
+            logger.error(
+                "hybrid_inference_init_failed",
+                agent_id=self.agent_id,
+                error=str(e),
+                exc_info=True,
+            )
 
     @property
     def info(self) -> AgentInfo:
@@ -103,6 +161,7 @@ class BaseAgent(ABC):
             metadata={
                 "a2a_port": self.a2a_port,
                 "a2a_url": f"ws://{self.agent_id}:{self.a2a_port}",
+                "hybrid_inference": self.inference_engine is not None,
             },
         )
 
@@ -149,7 +208,6 @@ class BaseAgent(ABC):
         """Run this agent's A2A server in a non-blocking way."""
         import websockets
         
-        server = None
         try:
             logger.info(
                 "starting_a2a_server",
@@ -158,21 +216,27 @@ class BaseAgent(ABC):
             )
             
             # Start server on 0.0.0.0 so it's accessible from other containers
-            server = await websockets.serve(
+            async with websockets.serve(
                 self.a2a_server.handle_client,
                 "0.0.0.0",
                 self.a2a_port,
-            )
+            ):
+                logger.info(
+                    "a2a_server_listening",
+                    agent_id=self.agent_id,
+                    port=self.a2a_port,
+                )
+                
+                # Wait for shutdown signal
+                await self.shutdown_event.wait()
+                
+                logger.info("a2a_server_shutting_down", agent_id=self.agent_id)
             
-            logger.info(
-                "a2a_server_listening",
-                agent_id=self.agent_id,
-                port=self.a2a_port,
-            )
+            logger.info("a2a_server_closed", agent_id=self.agent_id)
             
-            # Wait for shutdown signal instead of blocking forever
-            await self.shutdown_event.wait()
-            
+        except asyncio.CancelledError:
+            logger.info("a2a_server_cancelled", agent_id=self.agent_id)
+            raise
         except Exception as e:
             logger.error(
                 "a2a_server_error",
@@ -180,28 +244,32 @@ class BaseAgent(ABC):
                 error=str(e),
                 exc_info=True,
             )
-        finally:
-            if server:
-                logger.info("a2a_server_closing", agent_id=self.agent_id)
-                server.close()
-                await server.wait_closed()
-                logger.info("a2a_server_closed", agent_id=self.agent_id)
+            raise
 
     async def _discover_peers(self) -> None:
         """
         Discover other agents in the swarm.
         
         In Docker, we use service names:
-        - orchestrator:8765
-        - worker-1:8766, worker-2:8766, worker-3:8766
+        - ghost-orchestrator:8765
+        - ghost-worker-1:8766, ghost-worker-2:8766, ghost-worker-3:8766
         
         In production, this would query Redis or a service registry.
         """
-        # For now, hardcode Docker service discovery
-        # In production, query Redis registry
-        
-        from common.config.settings import get_settings
-        settings = get_settings()
+        try:
+            from common.config.settings import get_settings
+            settings = get_settings()
+        except Exception as e:
+            logger.warning(
+                "settings_unavailable",
+                agent_id=self.agent_id,
+                error=str(e),
+                message="Using default settings",
+            )
+            # Fallback to default
+            class DefaultSettings:
+                max_workers = 3
+            settings = DefaultSettings()
         
         # Discover based on role
         if self.role == AgentRole.WORKER:
@@ -210,7 +278,7 @@ class BaseAgent(ABC):
         
         elif self.role == AgentRole.ORCHESTRATOR:
             # Orchestrator discovers workers
-            # In Docker: worker-1, worker-2, worker-3
+            # In Docker: ghost-worker-1, ghost-worker-2, ghost-worker-3
             # TODO: Dynamic discovery via Redis
             for i in range(1, settings.max_workers + 1):
                 worker_id = f"worker-{i}"
@@ -305,8 +373,73 @@ class BaseAgent(ABC):
 
         # Run agent-specific cleanup
         await self.cleanup()
+        
+        # Cleanup executor pool (only if last agent)
+        # Note: ExecutorPool is shared globally, so we don't shut it down per-agent
+        # It will be cleaned up on process exit
+        # If needed, call: await self.executor_pool.shutdown()
 
         logger.info("agent_stopped", agent_id=self.agent_id)
+    
+    async def infer(
+        self,
+        prompt: str,
+        system: Optional[str] = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.7,
+        force_llm: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Perform hybrid inference (SLM or LLM based on task complexity).
+        
+        This is the main method agents use for LLM calls. It automatically
+        routes to SLM for simple tasks and LLM for complex tasks.
+        
+        Args:
+            prompt: User prompt
+            system: System prompt
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            force_llm: Force use of LLM regardless of complexity
+            **kwargs: Additional model-specific parameters
+            
+        Returns:
+            HybridInferenceResult with content and metadata
+            
+        Example:
+            result = await self.infer("Parse this JSON: {...}")
+            # Will use SLM for simple parsing
+            
+            result = await self.infer("Analyze the strategic implications...")
+            # Will use LLM for complex reasoning
+        """
+        if not self.inference_engine:
+            raise RuntimeError(
+                f"Hybrid inference not enabled for agent {self.agent_id}. "
+                "Provide llm_client during initialization."
+            )
+        
+        return await self.inference_engine.infer(
+            prompt=prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            force_llm=force_llm,
+            **kwargs,
+        )
+    
+    def get_inference_stats(self) -> dict[str, Any]:
+        """
+        Get inference statistics (SLM vs LLM usage, costs, latency, etc.).
+        
+        Returns:
+            Dict with statistics or empty dict if inference not enabled
+        """
+        if not self.inference_engine:
+            return {}
+        
+        return self.inference_engine.get_stats()
 
     @abstractmethod
     async def initialize(self) -> None:

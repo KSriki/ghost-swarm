@@ -60,3 +60,6 @@ chroma/
 *.swp
 *.swo
 *~
+
+# Models
+models/*

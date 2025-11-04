@@ -41,6 +41,11 @@ class WorkerAgent(BaseAgent):
             agent_id: Unique identifier for this worker
             capabilities: List of task types this worker can handle
         """
+        self.settings = get_settings()
+        
+        # Initialize Anthropic client for hybrid inference
+        anthropic_client = Anthropic(api_key=self.settings.anthropic_api_key)
+        
         super().__init__(
             agent_id=agent_id,
             role=AgentRole.WORKER,
@@ -52,20 +57,22 @@ class WorkerAgent(BaseAgent):
                 "generation",
             ],
             max_load=5,  # Can handle 5 concurrent tasks
+            llm_client=anthropic_client,  # Enable hybrid inference
         )
 
-        self.settings = get_settings()
-        self.anthropic_client: Anthropic | None = None
+        self.anthropic_client = anthropic_client
 
-        logger.info("worker_initialized", agent_id=self.agent_id)
+        logger.info(
+            "worker_initialized",
+            agent_id=self.agent_id,
+            hybrid_inference=self.inference_engine is not None,
+        )
 
     async def initialize(self) -> None:
         """Initialize worker-specific resources."""
         logger.info("initializing_worker", agent_id=self.agent_id)
 
-        # Initialize Anthropic client
-        self.anthropic_client = Anthropic(api_key=self.settings.anthropic_api_key)
-
+        # Anthropic client already initialized in __init__ for hybrid inference
         # Register with orchestrator (in a real system)
         # For now, this is a placeholder
         await self._register_with_orchestrator()
@@ -138,51 +145,63 @@ class WorkerAgent(BaseAgent):
 
     async def _handle_llm_inference(self, task: TaskRequest) -> dict[str, Any]:
         """
-        Handle LLM inference task using Claude.
+        Handle LLM inference task using HYBRID inference (SLM or LLM).
+        
+        This now automatically routes between SLM and LLM based on
+        task complexity. Simple tasks use SLM, complex tasks use LLM.
 
         Args:
             task: Task request
 
         Returns:
-            LLM response
+            LLM/SLM response
         """
-        if not self.anthropic_client:
-            raise RuntimeError("Anthropic client not initialized")
+        if not self.inference_engine:
+            raise RuntimeError("Hybrid inference not enabled")
 
         prompt = task.parameters.get("prompt", "")
-        model = task.parameters.get("model", "claude-sonnet-4-5-20250929")
+        system = task.parameters.get("system")
         max_tokens = task.parameters.get("max_tokens", 1024)
+        temperature = task.parameters.get("temperature", 0.7)
+        force_llm = task.parameters.get("force_llm", False)
 
         logger.debug(
             "llm_inference_request",
             task_id=str(task.task_id),
-            model=model,
             prompt_length=len(prompt),
+            force_llm=force_llm,
         )
 
-        # Use asyncio to run the synchronous Anthropic call
-        loop = asyncio.get_event_loop()
-        message = await loop.run_in_executor(
-            None,
-            lambda: self.anthropic_client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            ),
+        # Use hybrid inference engine - automatically routes to SLM or LLM
+        result = await self.infer(
+            prompt=prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            force_llm=force_llm,
         )
 
-        response_text = ""
-        for block in message.content:
-            if hasattr(block, "text"):
-                response_text += block.text
+        logger.info(
+            "inference_completed",
+            task_id=str(task.task_id),
+            provider=result.provider.value,
+            model=result.model,
+            tokens=result.tokens_used,
+            latency_ms=result.latency_ms,
+            complexity=result.complexity.value,
+            fallback=result.fallback_occurred,
+        )
 
         return {
-            "response": response_text,
-            "model": model,
+            "response": result.content,
+            "provider": result.provider.value,
+            "model": result.model,
+            "complexity": result.complexity.value,
+            "latency_ms": result.latency_ms,
             "usage": {
-                "input_tokens": message.usage.input_tokens,
-                "output_tokens": message.usage.output_tokens,
+                "tokens": result.tokens_used,
             },
+            "fallback_occurred": result.fallback_occurred,
         }
 
     async def _handle_data_processing(self, task: TaskRequest) -> dict[str, Any]:
@@ -254,35 +273,19 @@ class WorkerAgent(BaseAgent):
 async def main() -> None:
     """Main entry point for the worker."""
     from common import configure_logging
-    import signal
 
     configure_logging()
 
     import os
     worker = WorkerAgent(agent_id=os.getenv("AGENT_ID"))
-    shutdown_event = asyncio.Event()
-
-    def signal_handler() -> None:
-        """Handle shutdown signals."""
-        logger.info("shutdown_signal_received")
-        shutdown_event.set()
-
-    # Register signal handlers
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
 
     try:
         await worker.start()
-        logger.info("worker_running", agent_id=worker.agent_id)
-        
-        # Wait for shutdown signal
-        await shutdown_event.wait()
-        
-    except Exception as e:
-        logger.error("worker_error", error=str(e), exc_info=True)
+        # Keep running
+        await asyncio.Future()
+    except KeyboardInterrupt:
+        logger.info("shutdown_signal_received")
     finally:
-        logger.info("shutting_down_worker")
         await worker.stop()
 
 

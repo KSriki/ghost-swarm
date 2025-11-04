@@ -2,8 +2,10 @@
 
 import asyncio
 from typing import Any
+import os
 
 import structlog
+from anthropic import Anthropic
 
 from common.models.messages import (
     AgentInfo,
@@ -13,8 +15,13 @@ from common.models.messages import (
     TaskResult,
     TaskStatus,
 )
-from common.models.agent import BaseAgent
+from common import BaseAgent
 from common.logging.logger import get_logger
+from common.inference import (
+    TaskComplexity,
+    create_classifier,
+)
+from common import get_executor_pool
 
 logger = get_logger(__name__)
 
@@ -32,28 +39,50 @@ class OrchestratorAgent(BaseAgent):
 
     def __init__(self, agent_id: str | None = None) -> None:
         """
-        Initialize the orchestrator agent.
+        Initialize the orchestrator agent with TaskMaster capabilities.
 
         Args:
             agent_id: Unique identifier for this orchestrator
         """
+        # Initialize Anthropic client for hybrid inference
+        anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        anthropic_client = Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
+        
         super().__init__(
             agent_id=agent_id,
             role=AgentRole.ORCHESTRATOR,
             capabilities=[
                 "task_routing",
+                "task_classification",  # TaskMaster capability
                 "load_balancing",
                 "worker_management",
                 "result_aggregation",
             ],
             max_load=100,  # Can handle many concurrent orchestration tasks
+            llm_client=anthropic_client,  # Enable hybrid inference
         )
 
         self.workers: dict[str, AgentInfo] = {}
         self.task_assignments: dict[str, str] = {}  # task_id -> worker_id
         self.pending_tasks: asyncio.Queue[TaskRequest] = asyncio.Queue()
+        
+        # TaskMaster: Classify task complexity for intelligent routing
+        self.task_classifier = create_classifier()
+        self.executor_pool = get_executor_pool()
+        
+        # Track routing decisions for analytics
+        self.routing_stats = {
+            "simple_tasks": 0,
+            "moderate_tasks": 0,
+            "complex_tasks": 0,
+        }
 
-        logger.info("orchestrator_initialized", agent_id=self.agent_id)
+        logger.info(
+            "orchestrator_initialized",
+            agent_id=self.agent_id,
+            hybrid_inference=self.inference_engine is not None,
+            task_master_enabled=True,
+        )
 
     async def initialize(self) -> None:
         """Initialize orchestrator-specific resources."""
@@ -138,11 +167,14 @@ class OrchestratorAgent(BaseAgent):
                 await asyncio.sleep(5)
 
     async def _distribute_tasks(self) -> None:
-        """Distribute tasks to available workers."""
+        """Distribute tasks to available workers with TaskMaster classification."""
         while True:
             try:
                 # Get next task from queue
                 task = await self.pending_tasks.get()
+                
+                # TaskMaster: Classify task complexity before routing
+                await self.classify_and_route_task(task)
 
                 # Find available worker
                 worker = self._select_worker(task)
@@ -156,6 +188,7 @@ class OrchestratorAgent(BaseAgent):
                         "task_assigned",
                         task_id=str(task.task_id),
                         worker_id=worker.agent_id,
+                        complexity=task.parameters.get("_complexity"),
                     )
                 else:
                     # No available workers, re-queue
@@ -187,6 +220,82 @@ class OrchestratorAgent(BaseAgent):
 
         # Simple load balancing: select worker with lowest load
         return min(available_workers, key=lambda w: w.current_load)
+    
+    async def classify_and_route_task(self, task: TaskRequest) -> dict[str, Any]:
+        """
+        TaskMaster: Classify task complexity and add routing metadata.
+        
+        This runs in the ExecutorPool for non-blocking classification,
+        then adds complexity metadata to the task for workers to use.
+        
+        Args:
+            task: Task to classify
+            
+        Returns:
+            Dict with classification results and routing decision
+        """
+        # Extract prompt for classification
+        prompt = task.description or task.parameters.get("prompt", "")
+        
+        # Classify complexity using executor pool (non-blocking)
+        classification = await self.executor_pool.run_in_thread(
+            self.task_classifier.classify,
+            prompt,
+        )
+        
+        # Update routing stats
+        if classification.complexity == TaskComplexity.SIMPLE:
+            self.routing_stats["simple_tasks"] += 1
+        elif classification.complexity == TaskComplexity.MODERATE:
+            self.routing_stats["moderate_tasks"] += 1
+        else:
+            self.routing_stats["complex_tasks"] += 1
+        
+        # Add complexity metadata to task parameters
+        if not task.parameters:
+            task.parameters = {}
+        
+        task.parameters["_complexity"] = classification.complexity.value
+        task.parameters["_confidence"] = classification.confidence
+        task.parameters["_taskmaster_classified"] = True
+        
+        # Decide routing strategy
+        route_to_slm = classification.complexity in [
+            TaskComplexity.SIMPLE,
+            TaskComplexity.MODERATE,
+        ]
+        
+        logger.info(
+            "task_classified",
+            task_id=str(task.task_id),
+            complexity=classification.complexity.value,
+            confidence=classification.confidence,
+            route_to_slm=route_to_slm,
+        )
+        
+        return {
+            "complexity": classification.complexity.value,
+            "confidence": classification.confidence,
+            "route_to_slm": route_to_slm,
+            "reasoning": classification.reasoning,
+        }
+    
+    def get_routing_stats(self) -> dict[str, Any]:
+        """Get TaskMaster routing statistics."""
+        total = sum(self.routing_stats.values())
+        
+        return {
+            **self.routing_stats,
+            "total": total,
+            "simple_percentage": (
+                self.routing_stats["simple_tasks"] / total * 100
+                if total > 0 else 0
+            ),
+            "complex_percentage": (
+                self.routing_stats["complex_tasks"] / total * 100
+                if total > 0 else 0
+            ),
+        }
 
     def register_worker(self, worker_info: AgentInfo) -> None:
         """
@@ -221,34 +330,18 @@ class OrchestratorAgent(BaseAgent):
 async def main() -> None:
     """Main entry point for the orchestrator."""
     from common import configure_logging
-    import signal
 
     configure_logging()
 
     orchestrator = OrchestratorAgent()
-    shutdown_event = asyncio.Event()
-
-    def signal_handler() -> None:
-        """Handle shutdown signals."""
-        logger.info("shutdown_signal_received")
-        shutdown_event.set()
-
-    # Register signal handlers
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
 
     try:
         await orchestrator.start()
-        logger.info("orchestrator_running", agent_id=orchestrator.agent_id)
-        
-        # Wait for shutdown signal
-        await shutdown_event.wait()
-        
-    except Exception as e:
-        logger.error("orchestrator_error", error=str(e), exc_info=True)
+        # Keep running
+        await asyncio.Future()
+    except KeyboardInterrupt:
+        logger.info("shutdown_signal_received")
     finally:
-        logger.info("shutting_down_orchestrator")
         await orchestrator.stop()
 
 
