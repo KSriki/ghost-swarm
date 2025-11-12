@@ -1,23 +1,24 @@
+# Ghost Swarm Agent Mesh Docker Compose
+# Implements complete Agent Mesh architecture with AgentGateway
+
 services:
-  # =============================================================================
-  # BASE IMAGE SERVICE
-  # =============================================================================
+  # ===========================================================================
+  # BASE IMAGE
+  # ===========================================================================
   
   ghost-base:
     build:
       context: .
       dockerfile: Dockerfiles/Dockerfile.base
       target: dependencies
-      cache_from:
-        - ghost-base:dependencies
     image: ghost-base:dependencies
     command: /bin/true
     networks:
       - ghost-network
 
-  # =============================================================================
-  # INFRASTRUCTURE SERVICES
-  # =============================================================================
+  # ===========================================================================
+  # INFRASTRUCTURE
+  # ===========================================================================
 
   redis:
     image: redis:7-alpine
@@ -26,7 +27,7 @@ services:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --appendfsync everysec
+    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -36,14 +37,59 @@ services:
       - ghost-network
     restart: unless-stopped
 
-  # =============================================================================
-  # SLM Server - Local Small Language Model Inference
-  # =============================================================================
-  # Provides fast, FREE inference for simple tasks using Phi-3 Mini (3.8B params)
-  # Benefits: 70% cost reduction, 5-10x faster for simple tasks
-  # Requirements: 4-6GB RAM, ~2.3GB model download
-
+  # ===========================================================================
+  # LAYER 1: AGENT MESH (AgentGateway)
+  # ===========================================================================
+  # Unified entry point for:
+  # - LLM routing and caching
+  # - MCP tool federation
+  # - A2A agent mesh
   
+ 
+  agentgateway:
+    image: ghcr.io/agentgateway/agentgateway:latest
+    container_name: ghost-agentgateway
+    ports:
+      - "${AGENTGATEWAY_PORT:-3000}:3000"        # Main gateway
+      - "${AGENTGATEWAY_UI_PORT:-15000}:15000"   # Built-in UI
+      - "15020:15020"                             # Stats/Health endpoint
+    volumes:
+      - ./agentgateway-config.yaml:/app/config.yaml:ro
+      - ./common:/app/common:ro                   # For MCP servers
+      - ./mcp_server:/app/mcp_server:ro          # For MCP servers
+      - ./ghosts:/app/ghosts:ro                   # For agents MCP
+      - ghost-data:/app/data                      # MCP filesystem access
+      - gateway-logs:/var/log/agentgateway
+    command: ["-f", "/app/config.yaml"]
+    environment:
+      # Logging
+      RUST_LOG: ${RUST_LOG:-info}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      
+      # For MCP servers running via stdio
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      redis:
+        condition: service_healthy
+      slm-server:
+        condition: service_healthy
+    networks:
+      - ghost-network
+    restart: unless-stopped
+    healthcheck:
+      # AgentGateway exposes stats/readiness on port 15020
+      # Using TCP check since curl is not available in the agentgateway image
+      # test: ["CMD-SHELL", "timeout 5 sh -c '</dev/tcp/127.0.0.1/15020' || exit 1"]
+      # interval: 30s
+      # timeout: 10s
+      # start_period: 30s
+      # retries: 3
+      disable: true
+
+  # ===========================================================================
+  # SLM SERVER (Local Inference)
+  # ===========================================================================
   
   slm-server:
     image: ghcr.io/ggerganov/llama.cpp:server
@@ -53,8 +99,6 @@ services:
     volumes:
       - ./models:/models:ro
       - slm-cache:/cache
-    # The :server image automatically runs the server
-    # Just pass the model path and options as arguments
     command: 
       - "-m"
       - "/models/Phi-3-mini-4k-instruct-q4.gguf"
@@ -77,87 +121,9 @@ services:
       start_period: 120s
       retries: 5
 
-
-  # =============================================================================
-  # MCP SERVERS (Tool providers)
-  # =============================================================================
-
-  mcp-filesystem:
-    build:
-      context: .
-      dockerfile: Dockerfiles/Dockerfile.mcp
-    container_name: ghost-mcp-filesystem
-    environment:
-      # MCP Configuration
-      MCP_SERVER_TYPE: filesystem
-      MCP_ALLOWED_DIRECTORIES: ${MCP_ALLOWED_DIRECTORIES:-/app/data}
-      MCP_READONLY: ${MCP_READONLY:-false}
-      
-      # Claude API (for MCP server that needs it)
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      
-      # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_FORMAT: ${LOG_FORMAT:-json}
-      PYTHONPATH: /app
-      PYTHONUNBUFFERED: 1
-    volumes:
-      - ./common:/app/common:ro
-      - ./mcp_server:/app/mcp_server:ro
-      - ghost-data:/app/data
-      - ghost-logs:/app/logs
-    depends_on:
-      ghost-base:
-        condition: service_completed_successfully
-    networks:
-      - ghost-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-      interval: 30s
-      timeout: 10s
-      start_period: 30s
-      retries: 3
-
-  mcp-agents:
-    build:
-      context: .
-      dockerfile: Dockerfiles/Dockerfile.mcp
-    container_name: ghost-mcp-agents
-    environment:
-      # MCP Configuration
-      MCP_SERVER_TYPE: agents
-      
-      # Claude API (for MCP server that needs it)
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      
-      # Logging
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_FORMAT: ${LOG_FORMAT:-json}
-      PYTHONPATH: /app
-      PYTHONUNBUFFERED: 1
-    volumes:
-      - ./common:/app/common:ro
-      - ./ghosts:/app/ghosts:ro
-      - ./mcp_server:/app/mcp_server:ro
-      - ghost-logs:/app/logs
-    depends_on:
-      ghost-base:
-        condition: service_completed_successfully
-    networks:
-      - ghost-network
-    restart: unless-stopped
-    command: ["/app/.venv/bin/python", "-m", "mcp_server.agents"]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-      interval: 30s
-      timeout: 10s
-      start_period: 30s
-      retries: 3
-
-  # =============================================================================
-  # ORCHESTRATOR
-  # =============================================================================
+  # ===========================================================================
+  # LAYER 2: AGENTS
+  # ===========================================================================
 
   orchestrator:
     build:
@@ -165,32 +131,32 @@ services:
       dockerfile: Dockerfiles/Dockerfile.orchestrator
     container_name: ghost-orchestrator
     ports:
-      # Orchestrator runs its own A2A server on this port
       - "${ORCHESTRATOR_A2A_PORT:-8765}:8765"
     environment:
-      # Agent Configuration
+      # Agent config
       AGENT_ID: orchestrator
       AGENT_ROLE: orchestrator
       A2A_PORT: 8765
       
-      # Redis for service discovery
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # Agent Mesh URLs
+      AGENTGATEWAY_URL: http://agentgateway:3000
+      AGENTGATEWAY_MCP_URL: http://agentgateway:3000
+      AGENTGATEWAY_A2A_URL: http://agentgateway:3000
       
-      # Claude API (LLM)
+      # Direct LLM access (for now, later via gateway)
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-5-20250929}
       
-      # SLM Configuration
-      SLM_ENDPOINT: ${SLM_ENDPOINT:-http://slm-server:8080}
+      # SLM via gateway
+      SLM_ENDPOINT: http://agentgateway:3000/v1
       SLM_MODEL: ${SLM_MODEL:-phi-3-mini}
-      SLM_PROVIDER: ${SLM_PROVIDER:-llama_cpp}
-      ENABLE_SLM_FALLBACK: ${ENABLE_SLM_FALLBACK:-true}
       
-      # TaskMaster Classification Thresholds
+      # TaskMaster
       SIMPLE_THRESHOLD: ${SIMPLE_THRESHOLD:-0.3}
       COMPLEX_THRESHOLD: ${COMPLEX_THRESHOLD:-0.7}
       
-      # Orchestrator Settings
+      # Infrastructure
+      REDIS_URL: redis://redis:6379
       MAX_WORKERS: ${MAX_WORKERS:-10}
       WORKER_TIMEOUT: ${WORKER_TIMEOUT:-300}
       
@@ -211,6 +177,10 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      agentgateway:
+        condition: service_started
+      slm-server:
+        condition: service_healthy
     networks:
       - ghost-network
     restart: unless-stopped
@@ -221,39 +191,32 @@ services:
       start_period: 60s
       retries: 3
 
-  # =============================================================================
-  # WORKER AGENTS (Scale these as needed)
-  # =============================================================================
-
   worker-1:
     build:
       context: .
       dockerfile: Dockerfiles/Dockerfile.worker
     container_name: ghost-worker-1
     ports:
-      # Each worker exposes its own A2A port
       - "${WORKER_1_A2A_PORT:-8766}:8766"
     environment:
-      # Agent Configuration (ADDED AGENT_ID)
-      AGENT_ID: ${AGENT_ID:-worker-1}
+      AGENT_ID: worker-1
       AGENT_ROLE: worker
       A2A_PORT: 8766
       WORKER_CAPABILITIES: ${WORKER_1_CAPABILITIES:-llm_inference,data_processing,analysis}
       
-      # Redis for service discovery
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # Agent Mesh
+      AGENTGATEWAY_URL: http://agentgateway:3000
+      AGENTGATEWAY_MCP_URL: http://agentgateway:3000
+      AGENTGATEWAY_A2A_URL: http://agentgateway:3000
       
-      # Claude API (LLM)
+      # LLM
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-5-20250929}
-      
-      # SLM Configuration (ADDED)
-      SLM_ENDPOINT: ${SLM_ENDPOINT:-http://slm-server:8080}
+      SLM_ENDPOINT: http://agentgateway:3000/v1
       SLM_MODEL: ${SLM_MODEL:-phi-3-mini}
-      SLM_PROVIDER: ${SLM_PROVIDER:-llama_cpp}
-      ENABLE_SLM_FALLBACK: ${ENABLE_SLM_FALLBACK:-true}
       
-      # Worker Settings
+      # Infrastructure
+      REDIS_URL: redis://redis:6379
       MAX_LOAD: ${WORKER_MAX_LOAD:-5}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-300}
       
@@ -274,6 +237,8 @@ services:
         condition: service_completed_successfully
       orchestrator:
         condition: service_healthy
+      agentgateway:
+        condition: service_started
     networks:
       - ghost-network
     restart: unless-stopped
@@ -290,33 +255,22 @@ services:
       dockerfile: Dockerfiles/Dockerfile.worker
     container_name: ghost-worker-2
     ports:
-      # Each worker exposes its own A2A port
       - "${WORKER_2_A2A_PORT:-8767}:8766"
     environment:
-      # Agent Configuration (ADDED AGENT_ID)
-      AGENT_ID: ${AGENT_ID:-worker-2}
+      AGENT_ID: worker-2
       AGENT_ROLE: worker
       A2A_PORT: 8766
       WORKER_CAPABILITIES: ${WORKER_2_CAPABILITIES:-llm_inference,data_processing,analysis}
-      
-      # Redis for service discovery
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      
-      # Claude API (LLM)
+      AGENTGATEWAY_URL: http://agentgateway:3000
+      AGENTGATEWAY_MCP_URL: http://agentgateway:3000
+      AGENTGATEWAY_A2A_URL: http://agentgateway:3000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-5-20250929}
-      
-      # SLM Configuration (ADDED)
-      SLM_ENDPOINT: ${SLM_ENDPOINT:-http://slm-server:8080}
+      SLM_ENDPOINT: http://agentgateway:3000/v1
       SLM_MODEL: ${SLM_MODEL:-phi-3-mini}
-      SLM_PROVIDER: ${SLM_PROVIDER:-llama_cpp}
-      ENABLE_SLM_FALLBACK: ${ENABLE_SLM_FALLBACK:-true}
-      
-      # Worker Settings
+      REDIS_URL: redis://redis:6379
       MAX_LOAD: ${WORKER_MAX_LOAD:-5}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-300}
-      
-      # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       PYTHONPATH: /app
@@ -333,6 +287,8 @@ services:
         condition: service_completed_successfully
       orchestrator:
         condition: service_healthy
+      agentgateway:
+        condition: service_started
     networks:
       - ghost-network
     restart: unless-stopped
@@ -349,33 +305,22 @@ services:
       dockerfile: Dockerfiles/Dockerfile.worker
     container_name: ghost-worker-3
     ports:
-      # Each worker exposes its own A2A port
       - "${WORKER_3_A2A_PORT:-8768}:8766"
     environment:
-      # Agent Configuration (ADDED AGENT_ID)
-      AGENT_ID: ${AGENT_ID:-worker-3}
+      AGENT_ID: worker-3
       AGENT_ROLE: worker
       A2A_PORT: 8766
       WORKER_CAPABILITIES: ${WORKER_3_CAPABILITIES:-llm_inference,data_processing,analysis}
-      
-      # Redis for service discovery
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      
-      # Claude API (LLM)
+      AGENTGATEWAY_URL: http://agentgateway:3000
+      AGENTGATEWAY_MCP_URL: http://agentgateway:3000
+      AGENTGATEWAY_A2A_URL: http://agentgateway:3000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-5-20250929}
-      
-      # SLM Configuration (ADDED)
-      SLM_ENDPOINT: ${SLM_ENDPOINT:-http://slm-server:8080}
+      SLM_ENDPOINT: http://agentgateway:3000/v1
       SLM_MODEL: ${SLM_MODEL:-phi-3-mini}
-      SLM_PROVIDER: ${SLM_PROVIDER:-llama_cpp}
-      ENABLE_SLM_FALLBACK: ${ENABLE_SLM_FALLBACK:-true}
-      
-      # Worker Settings
+      REDIS_URL: redis://redis:6379
       MAX_LOAD: ${WORKER_MAX_LOAD:-5}
       TASK_TIMEOUT: ${TASK_TIMEOUT:-300}
-      
-      # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
       PYTHONPATH: /app
@@ -392,6 +337,8 @@ services:
         condition: service_completed_successfully
       orchestrator:
         condition: service_healthy
+      agentgateway:
+        condition: service_started
     networks:
       - ghost-network
     restart: unless-stopped
@@ -402,30 +349,12 @@ services:
       start_period: 60s
       retries: 3
 
-# =============================================================================
-# VOLUMES
-# =============================================================================
-
 volumes:
-  # Application data (logs, cache, temporary files)
   ghost-data:
-    driver: local
-
-  # Logs from all services
   ghost-logs:
-    driver: local
-
-  # Redis persistence
   redis-data:
-    driver: local
-  
-  # SLM model cache
   slm-cache:
-    driver: local
-
-# =============================================================================
-# NETWORKS
-# =============================================================================
+  gateway-logs:
 
 networks:
   ghost-network:

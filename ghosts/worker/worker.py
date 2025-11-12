@@ -4,7 +4,6 @@ import asyncio
 from typing import Any
 
 import structlog
-from anthropic import Anthropic
 
 from common.models.messages import (
     AgentRole,
@@ -12,7 +11,7 @@ from common.models.messages import (
     TaskResult,
     TaskStatus,
 )
-from common.models.agent import BaseAgent
+from common import BaseAgent
 from common.logging.logger import get_logger
 from common.config.settings import get_settings
 
@@ -27,6 +26,8 @@ class WorkerAgent(BaseAgent):
     - Execute assigned tasks
     - Report results back to orchestrator
     - Maintain task execution state
+    
+    Uses AgentGateway for all LLM inference routing.
     """
 
     def __init__(
@@ -43,9 +44,6 @@ class WorkerAgent(BaseAgent):
         """
         self.settings = get_settings()
         
-        # Initialize Anthropic client for hybrid inference
-        anthropic_client = Anthropic(api_key=self.settings.anthropic_api_key)
-        
         super().__init__(
             agent_id=agent_id,
             role=AgentRole.WORKER,
@@ -57,22 +55,19 @@ class WorkerAgent(BaseAgent):
                 "generation",
             ],
             max_load=5,  # Can handle 5 concurrent tasks
-            llm_client=anthropic_client,  # Enable hybrid inference
+            enable_gateway=True,  # Enable AgentGateway communication
         )
-
-        self.anthropic_client = anthropic_client
 
         logger.info(
             "worker_initialized",
             agent_id=self.agent_id,
-            hybrid_inference=self.inference_engine is not None,
+            gateway_enabled=self.gateway_client is not None,
         )
 
     async def initialize(self) -> None:
         """Initialize worker-specific resources."""
         logger.info("initializing_worker", agent_id=self.agent_id)
 
-        # Anthropic client already initialized in __init__ for hybrid inference
         # Register with orchestrator (in a real system)
         # For now, this is a placeholder
         await self._register_with_orchestrator()
@@ -80,7 +75,6 @@ class WorkerAgent(BaseAgent):
     async def cleanup(self) -> None:
         """Clean up worker resources."""
         logger.info("cleaning_up_worker", agent_id=self.agent_id)
-        self.anthropic_client = None
 
     async def process_task(self, task: TaskRequest) -> TaskResult:
         """
@@ -145,10 +139,11 @@ class WorkerAgent(BaseAgent):
 
     async def _handle_llm_inference(self, task: TaskRequest) -> dict[str, Any]:
         """
-        Handle LLM inference task using HYBRID inference (SLM or LLM).
+        Handle LLM inference task via AgentGateway.
         
-        This now automatically routes between SLM and LLM based on
-        task complexity. Simple tasks use SLM, complex tasks use LLM.
+        The gateway automatically routes between SLM and LLM based on
+        TaskMaster complexity classification. Simple tasks use SLM, 
+        complex tasks use LLM.
 
         Args:
             task: Task request
@@ -156,52 +151,48 @@ class WorkerAgent(BaseAgent):
         Returns:
             LLM/SLM response
         """
-        if not self.inference_engine:
-            raise RuntimeError("Hybrid inference not enabled")
+        if not self.gateway_client:
+            raise RuntimeError("Gateway client not enabled")
 
         prompt = task.parameters.get("prompt", "")
         system = task.parameters.get("system")
         max_tokens = task.parameters.get("max_tokens", 1024)
         temperature = task.parameters.get("temperature", 0.7)
-        force_llm = task.parameters.get("force_llm", False)
+        
+        # Get complexity hint from TaskMaster classification (if available)
+        complexity = task.parameters.get("_complexity", "moderate")
 
         logger.debug(
             "llm_inference_request",
             task_id=str(task.task_id),
             prompt_length=len(prompt),
-            force_llm=force_llm,
+            complexity=complexity,
         )
 
-        # Use hybrid inference engine - automatically routes to SLM or LLM
+        # Route through gateway - it handles SLM vs LLM decision
         result = await self.infer(
             prompt=prompt,
             system=system,
             max_tokens=max_tokens,
             temperature=temperature,
-            force_llm=force_llm,
+            complexity=complexity,
         )
 
         logger.info(
             "inference_completed",
             task_id=str(task.task_id),
-            provider=result.provider.value,
-            model=result.model,
-            tokens=result.tokens_used,
-            latency_ms=result.latency_ms,
-            complexity=result.complexity.value,
-            fallback=result.fallback_occurred,
+            provider=result.get("provider"),
+            model=result.get("model"),
+            complexity=complexity,
         )
 
         return {
-            "response": result.content,
-            "provider": result.provider.value,
-            "model": result.model,
-            "complexity": result.complexity.value,
-            "latency_ms": result.latency_ms,
-            "usage": {
-                "tokens": result.tokens_used,
-            },
-            "fallback_occurred": result.fallback_occurred,
+            "response": result.get("content"),
+            "provider": result.get("provider"),
+            "model": result.get("model"),
+            "complexity": complexity,
+            "usage": result.get("usage", {}),
+            "cost": result.get("cost", 0.0),
         }
 
     async def _handle_data_processing(self, task: TaskRequest) -> dict[str, Any]:

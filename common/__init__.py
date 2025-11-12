@@ -34,6 +34,8 @@ from common.communication.concurrency import (
     cleanup_executors,
 )
 
+from common.inference.gateway_client import AgentGatewayClient
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -68,4 +70,5 @@ __all__ = [
     "run_cpu_bound",
     "run_io_bound",
     "cleanup_executors",
+    "AgentGatewayClient",
 ]

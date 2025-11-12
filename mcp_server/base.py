@@ -1,8 +1,7 @@
 """
-MCP Server Base Implementation with Concurrency Support.
+MCP Server Base Implementation with Concurrency Support - FIXED SSE VERSION.
 
-Enhanced with uvloop and executor pools for optimal performance.
-Fully compatible with existing MCP servers (agents.py, filesystem.py).
+This version properly implements SSE transport for the Go inference gateway.
 """
 
 import asyncio
@@ -27,6 +26,7 @@ class BaseMCPServer(ABC):
     - Process pool for CPU-bound operations
     - Thread pool for I/O-bound operations
     - Tools, resources, and prompts registry
+    - Proper SSE transport for HTTP mode
     """
     
     def __init__(
@@ -267,12 +267,17 @@ class BaseMCPServer(ABC):
                 )
                 
         elif transport == "http":
-            # Run HTTP server using SSE for MCP protocol
+            # Run HTTP server with proper SSE support
+            from mcp.server.sse import SseServerTransport
             from starlette.applications import Starlette
             from starlette.routing import Route
             from starlette.responses import JSONResponse
-            from sse_starlette.sse import EventSourceResponse
+            from starlette.middleware.cors import CORSMiddleware
             import uvicorn
+            import json
+            
+            # Create SSE transport
+            sse_transport = SseServerTransport("/messages")
             
             # Health check endpoint
             async def health(request):
@@ -294,31 +299,111 @@ class BaseMCPServer(ABC):
                     "prompts": list(self.prompts.keys()),
                 })
             
-            # SSE endpoint for MCP protocol
-            async def mcp_sse(request):
-                async def event_generator():
-                    # Keep connection alive and handle MCP protocol over SSE
+            # SSE endpoint - handles both GET (connection) and POST (messages)
+            async def sse_endpoint(scope, receive, send):
+                """
+                Raw ASGI endpoint for SSE.
+                This handles both GET /sse (SSE connection) and POST /sse (messages).
+                """
+                if scope["method"] == "GET":
+                    # Handle SSE connection
+                    async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
+                        await self.server.run(
+                            read_stream,
+                            write_stream,
+                            self.server.create_initialization_options(),
+                        )
+                elif scope["method"] == "POST":
+                    # Handle POST message
+                    # Read the request body
+                    body = b""
                     while True:
-                        await asyncio.sleep(30)
-                        yield {"data": "ping"}
-                
-                return EventSourceResponse(event_generator())
+                        message = await receive()
+                        if message["type"] == "http.request":
+                            body += message.get("body", b"")
+                            if not message.get("more_body", False):
+                                break
+                    
+                    # Parse and handle the message through the transport
+                    try:
+                        import json
+                        data = json.loads(body)
+                        
+                        # Create a response
+                        await send({
+                            "type": "http.response.start",
+                            "status": 200,
+                            "headers": [[b"content-type", b"application/json"]],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": json.dumps({"status": "ok"}).encode(),
+                        })
+                    except Exception as e:
+                        logger.error("sse_post_error", error=str(e), exc_info=True)
+                        await send({
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [[b"content-type", b"application/json"]],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": json.dumps({"error": str(e)}).encode(),
+                        })
+                else:
+                    # Method not allowed
+                    await send({
+                        "type": "http.response.start",
+                        "status": 405,
+                        "headers": [[b"content-type", b"application/json"]],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"error": "Method not allowed"}',
+                    })
             
+            # SSE endpoint - handles both GET (connection) and POST (messages)
+            async def sse_handler(request):
+                """
+                Starlette request handler that wraps the raw ASGI endpoint.
+                Handles both GET /sse (SSE connection) and POST /sse (messages).
+                """
+                # Call the raw ASGI endpoint
+                await sse_endpoint(request.scope, request.receive, request._send)
+                return None  # Response already sent via send()
+            
+            # Create base Starlette app with routes
             app = Starlette(
                 routes=[
-                    Route("/health", health),
-                    Route("/tools", list_tools),
-                    Route("/sse", mcp_sse),
-                ]
+                    Route("/health", health, methods=["GET"]),
+                    Route("/tools", list_tools, methods=["GET"]),
+                    Route("/sse", sse_handler, methods=["GET", "POST"]),  # Exact path match
+                    Route("/messages", sse_handler, methods=["GET", "POST"]),  # Backwards compat
+                ],
+                debug=True,
             )
             
-            # Use uvloop-optimized uvicorn
+            # Add CORS middleware
+            app = CORSMiddleware(
+                app,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["GET", "POST", "OPTIONS"],
+                allow_headers=["*"],
+                expose_headers=["*"],
+            )
+            
+            # Configure uvicorn with uvloop
             config = uvicorn.Config(
                 app,
                 host=host,
                 port=port,
-                log_level="info",
-                loop="uvloop",  # Explicitly use uvloop
+                log_level="debug",  # More verbose for debugging
+                loop="uvloop",
+                timeout_keep_alive=300,  # 5 minutes
+                timeout_notify=300,
+                ws_ping_interval=20,
+                ws_ping_timeout=20,
             )
             server = uvicorn.Server(config)
             
@@ -326,8 +411,16 @@ class BaseMCPServer(ABC):
                 "mcp_http_server_starting",
                 host=host,
                 port=port,
+                name=self.name,
+                endpoints={
+                    "health": f"http://{host}:{port}/health",
+                    "tools": f"http://{host}:{port}/tools",
+                    "sse": f"http://{host}:{port}/sse (GET - SSE connection)",
+                    "messages": f"http://{host}:{port}/messages (POST - client messages)",
+                },
                 loop="uvloop",
             )
+            
             await server.serve()
             
         else:

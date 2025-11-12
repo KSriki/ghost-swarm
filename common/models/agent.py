@@ -1,4 +1,4 @@
-"""Refactored base agent class with integrated A2A server and hybrid inference."""
+"""Corrected BaseAgent with AgentGateway integration (no direct LLM/SLM clients)."""
 
 import asyncio
 import os
@@ -19,24 +19,29 @@ from common.models.messages import (
     TaskResult,
     TaskStatus,
 )
-# Import from communication.concurrency (correct path for your structure)
 from common.communication.concurrency import get_executor_pool, ExecutorPool
 
+# Import AgentGatewayClient using absolute import
+# This works whether gateway_client.py is at:
+# - common/agentgateway/gateway_client.py
+# - common/gateway_client.py
+from ..inference.gateway_client import AgentGatewayClient
+          
 logger = structlog.get_logger(__name__)
 
 
 class BaseAgent(ABC):
     """
-    Refactored Base class for all Ghost agents.
+    Base class for all Ghost agents with AgentGateway integration.
     
-    Each agent runs its own A2A server AND can connect to other agents.
-    No central A2A hub needed - pure peer-to-peer communication.
+    Architecture:
+        Agent → AgentGateway → {SLM, LLM, MCP Servers}
     
-    Includes:
-    - Hybrid Inference (SLM + LLM routing)
-    - ExecutorPool integration for non-blocking operations
-    - Statistics tracking
-    - Concurrency with uvloop
+    Each agent:
+    - Runs its own A2A server for peer-to-peer communication
+    - Routes ALL inference through AgentGateway (no direct clients!)
+    - Uses ExecutorPool for non-blocking operations
+    - Discovers MCP tools via gateway
     """
 
     def __init__(
@@ -46,7 +51,7 @@ class BaseAgent(ABC):
         capabilities: list[str] | None = None,
         max_load: int = 10,
         a2a_port: int | None = None,
-        llm_client: Any | None = None,  # Claude/Anthropic client for hybrid inference
+        enable_gateway: bool = True,
     ) -> None:
         """
         Initialize the base agent.
@@ -57,7 +62,7 @@ class BaseAgent(ABC):
             capabilities: List of capabilities this agent supports
             max_load: Maximum concurrent tasks
             a2a_port: Port for this agent's A2A server
-            llm_client: LLM client (e.g., Anthropic) for hybrid inference
+            enable_gateway: Whether to enable AgentGateway communication
         """
         self.agent_id = agent_id or f"{role.value}-{uuid4().hex[:8]}"
         self.role = role
@@ -83,17 +88,21 @@ class BaseAgent(ABC):
         self.shutdown_event = asyncio.Event()
         
         # ExecutorPool for non-blocking CPU/IO operations
-        # Used by TaskMaster classification, inference, and other concurrent operations
         self.executor_pool: ExecutorPool = get_executor_pool()
         
-        # Hybrid Inference Engine (SLM + LLM)
-        # Each agent can now choose between SLM and LLM based on task complexity
-        self.llm_client = llm_client
-        self.inference_engine: Optional[Any] = None
+        # AgentGateway client (replaces direct LLM/SLM clients)
+        self.gateway_client: Optional[AgentGatewayClient] = None
         
-        # Will be initialized in start() if llm_client provided
-        if llm_client:
-            self._init_inference_engine()
+        # Inference statistics
+        self.stats = {
+            "gateway_calls": 0,
+            "gateway_errors": 0,
+            "total_tokens": 0,
+            "total_cost": 0.0,
+        }
+        
+        if enable_gateway:
+            self._init_gateway_client()
 
         logger.info(
             "agent_initialized",
@@ -101,7 +110,7 @@ class BaseAgent(ABC):
             role=role.value,
             a2a_port=self.a2a_port,
             capabilities=self.capabilities,
-            hybrid_inference=self.inference_engine is not None,
+            gateway_enabled=self.gateway_client is not None,
             executor_pool_workers=f"{self.executor_pool.max_process_workers}p/{self.executor_pool.max_thread_workers}t",
         )
 
@@ -116,36 +125,25 @@ class BaseAgent(ABC):
         }
         return port_map.get(role, 8770)
     
-    def _init_inference_engine(self) -> None:
-        """Initialize hybrid inference engine."""
+    def _init_gateway_client(self) -> None:
+        """Initialize AgentGateway client."""
+        gateway_url = os.getenv("AGENTGATEWAY_URL", "http://agentgateway:3000")
+        
         try:
-            from common.inference import HybridInferenceEngine
-            
-            self.inference_engine = HybridInferenceEngine(
-                llm_client=self.llm_client,
-                slm_provider=os.getenv("SLM_PROVIDER", "llama_cpp"),
-                slm_endpoint=os.getenv("SLM_ENDPOINT"),
-                enable_fallback=os.getenv("ENABLE_SLM_FALLBACK", "true").lower() == "true",
+            self.gateway_client = AgentGatewayClient(
+                gateway_url=gateway_url,
+                agent_id=self.agent_id,
             )
-            
             logger.info(
-                "hybrid_inference_initialized",
+                "gateway_client_initialized",
                 agent_id=self.agent_id,
-                slm_provider=self.inference_engine.slm_provider.provider_type.value,
-            )
-        except ImportError as e:
-            logger.warning(
-                "hybrid_inference_unavailable",
-                agent_id=self.agent_id,
-                error=str(e),
-                message="Inference module not found. Agent will not support hybrid inference.",
+                gateway_url=gateway_url,
             )
         except Exception as e:
-            logger.error(
-                "hybrid_inference_init_failed",
+            logger.warning(
+                "gateway_client_init_failed",
                 agent_id=self.agent_id,
                 error=str(e),
-                exc_info=True,
             )
 
     @property
@@ -161,7 +159,7 @@ class BaseAgent(ABC):
             metadata={
                 "a2a_port": self.a2a_port,
                 "a2a_url": f"ws://{self.agent_id}:{self.a2a_port}",
-                "hybrid_inference": self.inference_engine is not None,
+                "gateway_enabled": self.gateway_client is not None,
             },
         )
 
@@ -266,7 +264,6 @@ class BaseAgent(ABC):
                 error=str(e),
                 message="Using default settings",
             )
-            # Fallback to default
             class DefaultSettings:
                 max_workers = 3
             settings = DefaultSettings()
@@ -278,8 +275,6 @@ class BaseAgent(ABC):
         
         elif self.role == AgentRole.ORCHESTRATOR:
             # Orchestrator discovers workers
-            # In Docker: ghost-worker-1, ghost-worker-2, ghost-worker-3
-            # TODO: Dynamic discovery via Redis
             for i in range(1, settings.max_workers + 1):
                 worker_id = f"worker-{i}"
                 self.peer_agents[worker_id] = f"ws://ghost-worker-{i}:8766"
@@ -294,7 +289,6 @@ class BaseAgent(ABC):
     async def _get_peer_connection(self, peer_id: str) -> A2AClient:
         """Get or create connection to a peer agent with retry logic."""
         if peer_id not in self.peer_connections:
-            # Create new connection with retry
             peer_url = self.peer_agents.get(peer_id)
             if not peer_url:
                 raise ValueError(f"Unknown peer: {peer_id}")
@@ -323,7 +317,7 @@ class BaseAgent(ABC):
                             attempt=attempt + 1,
                             error=str(e),
                         )
-                        await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+                        await asyncio.sleep(1 * (attempt + 1))
                     else:
                         logger.error(
                             "peer_connection_failed",
@@ -368,16 +362,18 @@ class BaseAgent(ABC):
                 await client.disconnect()
             except Exception as e:
                 logger.warning("peer_disconnect_error", error=str(e))
+        
+        # Close gateway client
+        if self.gateway_client:
+            try:
+                await self.gateway_client.close()
+            except Exception as e:
+                logger.warning("gateway_client_close_error", error=str(e))
 
         self.status = AgentStatus.OFFLINE
 
         # Run agent-specific cleanup
         await self.cleanup()
-        
-        # Cleanup executor pool (only if last agent)
-        # Note: ExecutorPool is shared globally, so we don't shut it down per-agent
-        # It will be cleaned up on process exit
-        # If needed, call: await self.executor_pool.shutdown()
 
         logger.info("agent_stopped", agent_id=self.agent_id)
     
@@ -387,59 +383,90 @@ class BaseAgent(ABC):
         system: Optional[str] = None,
         max_tokens: int = 1024,
         temperature: float = 0.7,
-        force_llm: bool = False,
+        complexity: Optional[str] = None,
         **kwargs: Any,
-    ) -> Any:
+    ) -> dict[str, Any]:
         """
-        Perform hybrid inference (SLM or LLM based on task complexity).
+        Perform inference via AgentGateway.
         
-        This is the main method agents use for LLM calls. It automatically
-        routes to SLM for simple tasks and LLM for complex tasks.
+        The gateway routes to SLM or LLM based on TaskMaster complexity.
+        - simple → SLM (llama.cpp/Phi-3-mini) - FREE, fast
+        - moderate/complex → LLM (Claude API) - paid, better quality
         
         Args:
             prompt: User prompt
             system: System prompt
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
-            force_llm: Force use of LLM regardless of complexity
+            complexity: Task complexity from TaskMaster ("simple", "moderate", "complex")
             **kwargs: Additional model-specific parameters
             
         Returns:
-            HybridInferenceResult with content and metadata
-            
-        Example:
-            result = await self.infer("Parse this JSON: {...}")
-            # Will use SLM for simple parsing
-            
-            result = await self.infer("Analyze the strategic implications...")
-            # Will use LLM for complex reasoning
+            Dict with content and metadata
         """
-        if not self.inference_engine:
+        if not self.gateway_client:
             raise RuntimeError(
-                f"Hybrid inference not enabled for agent {self.agent_id}. "
-                "Provide llm_client during initialization."
+                f"Gateway client not enabled for agent {self.agent_id}. "
+                "Set enable_gateway=True in agent initialization."
             )
         
-        return await self.inference_engine.infer(
-            prompt=prompt,
-            system=system,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            force_llm=force_llm,
-            **kwargs,
-        )
+        messages = [{"role": "user", "content": prompt}]
+        
+        try:
+            result = await self.gateway_client.infer(
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                complexity=complexity,
+                **kwargs,
+            )
+            
+            # Update stats
+            self.stats["gateway_calls"] += 1
+            if "usage" in result:
+                self.stats["total_tokens"] += (
+                    result["usage"].get("input_tokens", 0) +
+                    result["usage"].get("output_tokens", 0)
+                )
+            if "cost" in result:
+                self.stats["total_cost"] += result["cost"]
+            
+            logger.info(
+                "gateway_inference_complete",
+                agent_id=self.agent_id,
+                complexity=complexity,
+                model=result.get("model"),
+                provider=result.get("provider"),
+            )
+            
+            return result
+            
+        except Exception as e:
+            self.stats["gateway_errors"] += 1
+            logger.error(
+                "gateway_inference_error",
+                agent_id=self.agent_id,
+                error=str(e),
+            )
+            raise
     
     def get_inference_stats(self) -> dict[str, Any]:
         """
-        Get inference statistics (SLM vs LLM usage, costs, latency, etc.).
+        Get inference statistics.
         
         Returns:
-            Dict with statistics or empty dict if inference not enabled
+            Dict with statistics
         """
-        if not self.inference_engine:
-            return {}
-        
-        return self.inference_engine.get_stats()
+        return {
+            **self.stats,
+            "success_rate": (
+                (self.stats["gateway_calls"] - self.stats["gateway_errors"]) 
+                / self.stats["gateway_calls"] * 100
+                if self.stats["gateway_calls"] > 0 
+                else 0
+            ),
+        }
 
     @abstractmethod
     async def initialize(self) -> None:

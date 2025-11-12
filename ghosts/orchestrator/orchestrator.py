@@ -2,10 +2,8 @@
 
 import asyncio
 from typing import Any
-import os
 
 import structlog
-from anthropic import Anthropic
 
 from common.models.messages import (
     AgentInfo,
@@ -44,10 +42,6 @@ class OrchestratorAgent(BaseAgent):
         Args:
             agent_id: Unique identifier for this orchestrator
         """
-        # Initialize Anthropic client for hybrid inference
-        anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-        anthropic_client = Anthropic(api_key=anthropic_api_key) if anthropic_api_key else None
-        
         super().__init__(
             agent_id=agent_id,
             role=AgentRole.ORCHESTRATOR,
@@ -59,7 +53,7 @@ class OrchestratorAgent(BaseAgent):
                 "result_aggregation",
             ],
             max_load=100,  # Can handle many concurrent orchestration tasks
-            llm_client=anthropic_client,  # Enable hybrid inference
+            enable_gateway=True,  # Enable AgentGateway for inference routing
         )
 
         self.workers: dict[str, AgentInfo] = {}
@@ -80,7 +74,7 @@ class OrchestratorAgent(BaseAgent):
         logger.info(
             "orchestrator_initialized",
             agent_id=self.agent_id,
-            hybrid_inference=self.inference_engine is not None,
+            gateway_enabled=self.gateway_client is not None,
             task_master_enabled=True,
         )
 

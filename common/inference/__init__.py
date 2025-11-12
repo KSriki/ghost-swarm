@@ -30,6 +30,8 @@ from .providers import (
     AnthropicProvider,
 )
 
+from .gateway_client import AgentGatewayClient
+
 __all__ = [
     # Classifier
     "TaskClassifier",
@@ -46,4 +48,5 @@ __all__ = [
     "LlamaCppProvider",
     "OllamaProvider",
     "AnthropicProvider",
+    "AgentGatewayClient"
 ]

@@ -1,0 +1,160 @@
+# Ghost Swarm Agent Mesh Configuration - CORRECTED v5
+# AgentGateway configuration with LLM routing, MCP federation, A2A mesh, and security
+
+config:
+  # Logging configuration
+  logging:
+    format: json
+    level: info
+    fields:
+      add:
+        service: ghost-swarm-mesh
+        environment: development
+  
+  # Management endpoints - CORRECT FIELD NAMES AND TYPES
+  adminAddr: "0.0.0.0:15000"      # Admin UI
+  statsAddr: "0.0.0.0:15001"      # Prometheus metrics
+  readinessAddr: "0.0.0.0:15002"  # Health checks
+  
+  # Worker threads - MUST BE STRING
+  workerThreads: "4"
+  
+  # Graceful shutdown settings - MUST BE STRINGS
+  connectionTerminationDeadline: "30s"
+  connectionMinTerminationDeadline: "5s"
+
+# ============================================================
+# BINDS: Port bindings with listeners and routes
+# ============================================================
+binds:
+  # ============================================================
+  # PORT 3000: Multi-purpose gateway (LLM + MCP + A2A)
+  # ============================================================
+  - port: 3000
+    listeners:
+      # ----------------------------------------------------------
+      # PATTERN 1: Agent → LLM Communication
+      # ----------------------------------------------------------
+      # Intelligent routing for inference requests
+      - name: llm-gateway
+        routes:
+          - policies:
+              # CORS for web-based agents
+              cors:
+                allowOrigins: ["*"]
+                allowHeaders: ["*"]
+                allowMethods: ["GET", "POST", "OPTIONS"]
+                exposeHeaders: ["*"]
+                maxAge: 3600s
+              
+              # Rate limiting - Token bucket (100 req/min)
+              localRateLimit:
+                - maxTokens: 100
+                  tokensPerFill: 100
+                  fillInterval: 60s
+            
+            backends:
+              # SLM server for local inference
+              - host: slm-server:8080
+                weight: 1
+      
+      # ----------------------------------------------------------
+      # PATTERN 2: Agent → Tools (MCP Federation)
+      # ----------------------------------------------------------
+      # Centralized tool registry with security
+      - name: mcp-federation
+        routes:
+          - policies:
+              # MCP-specific CORS headers
+              cors:
+                allowOrigins: ["*"]
+                allowHeaders:
+                  - mcp-protocol-version
+                  - content-type
+                  - cache-control
+                  - authorization
+                allowMethods: ["GET", "POST", "OPTIONS"]
+                exposeHeaders:
+                  - mcp-protocol-version
+                maxAge: 3600s
+              
+              # Higher rate limit for tool calls (200 req/min)
+              localRateLimit:
+                - maxTokens: 200
+                  tokensPerFill: 200
+                  fillInterval: 60s
+            
+            backends:
+              # MCP servers via stdio
+              - mcp:
+                  targets:
+                    # Filesystem MCP server
+                    - name: filesystem
+                      stdio:
+                        cmd: python
+                        args:
+                          - "-m"
+                          - "mcp_server.servers.filesystem"
+                        env:
+                          MCP_ALLOWED_DIRECTORIES: "/app/data"
+                          MCP_READONLY: "false"
+                          PYTHONPATH: "/app"
+                    
+                    # Agents MCP server
+                    - name: agents
+                      stdio:
+                        cmd: python
+                        args:
+                          - "-m"
+                          - "mcp_server.servers.agents"
+                        env:
+                          REDIS_URL: "redis://redis:6379"
+                          PYTHONPATH: "/app"
+      
+      # ----------------------------------------------------------
+      # PATTERN 3: Agent → Agent (A2A Mesh)
+      # ----------------------------------------------------------
+      # Peer-to-peer agent communication with load balancing
+      - name: a2a-mesh
+        routes:
+          - policies:
+              # A2A-specific CORS
+              cors:
+                allowOrigins: ["*"]
+                allowHeaders: ["*"]
+                allowMethods: ["GET", "POST", "OPTIONS", "WEBSOCKET"]
+              
+              # A2A rate limiting (150 req/min)
+              localRateLimit:
+                - maxTokens: 150
+                  tokensPerFill: 150
+                  fillInterval: 60s
+            
+            backends:
+              # Orchestrator - primary coordinator
+              - host: ghost-orchestrator:8765
+                weight: 1
+              
+              # Workers - load balanced for task execution
+              - host: ghost-worker-1:8766
+                weight: 1
+              
+              - host: ghost-worker-2:8766
+                weight: 1
+              
+              - host: ghost-worker-3:8766
+                weight: 1
+
+  # ============================================================
+  # PORT 3001: Future expansion port (optional)
+  # ============================================================
+  # Reserved for future services like:
+  # - Additional MCP servers
+  # - External API integrations
+  # - Custom middleware services
+  # - port: 3001
+  #   listeners:
+  #     - name: future-services
+  #       routes:
+  #         - backends:
+  #             - host: future-service:8080
